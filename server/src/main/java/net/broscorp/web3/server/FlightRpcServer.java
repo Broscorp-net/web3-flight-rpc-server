@@ -45,17 +45,16 @@ public class FlightRpcServer {
     private static void runBlocksAndLogsProducer(String[] args) {
         String flightPortString = System.getenv("FLIGHT_PORT");
         String ethereumNodeUrl = System.getenv("ETHEREUM_NODE_URL");
-        int flightPort;
-        if (args.length == 2) {
+        String maxBlockRangeString = System.getenv("MAX_BLOCK_RANGE");
+
+        if (args.length == 3) {
             ethereumNodeUrl = args[0];
             flightPortString = args[1];
+            maxBlockRangeString = args[2];
         }
 
-        if (flightPortString == null) {
-            flightPort = 8815;
-        } else {
-            flightPort = Integer.parseInt(flightPortString);
-        }
+        int flightPort = flightPortString == null ? 8815 : Integer.parseInt(flightPortString);
+        int maxBlockRange = maxBlockRangeString == null ? 500 : Integer.parseInt(maxBlockRangeString);
 
         if (ethereumNodeUrl == null) {
             log.error("ETHEREUM_NODE_URL is null");
@@ -74,8 +73,8 @@ public class FlightRpcServer {
              FlightServer server = FlightServer.builder()
                      .allocator(allocator)
                      .location(serverLocation)
-                     .producer(new Producer(new LogsService(web3),
-                             new BlocksService(web3),
+                     .producer(new Producer(new LogsService(web3, maxBlockRange),
+                             new BlocksService(web3, maxBlockRange),
                              new SubscriptionFactory(allocator, new Converter(), executorService)))
                      .build()) {
 

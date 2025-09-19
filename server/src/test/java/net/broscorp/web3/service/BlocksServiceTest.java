@@ -49,7 +49,7 @@ class BlocksServiceTest {
     void registerNewSubscription_historicalRequest_sendsDataAndClosesSubscription() {
         // GIVEN
         ExecutorService testExecutor = Executors.newSingleThreadExecutor();
-        blocksService = new BlocksService(web3jMock, testExecutor);
+        blocksService = new BlocksService(web3jMock, 500, testExecutor);
 
         BlocksRequest historicalRequest = new BlocksRequest();
         BigInteger startBlock = BigInteger.valueOf(100);
@@ -93,7 +93,7 @@ class BlocksServiceTest {
     @SneakyThrows
     void registerNewSubscription_realtimeRequest_sendsBackfillAndDoesNotCloseSubscription() {
         // GIVEN
-        blocksService = new BlocksService(web3jMock);
+        blocksService = new BlocksService(web3jMock, 500);
 
         BlocksRequest historicalRequest = new BlocksRequest();
         BigInteger startBlock = BigInteger.valueOf(100);

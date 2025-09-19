@@ -55,7 +55,7 @@ class LogsServiceTest {
     void registerNewSubscription_historicalRequest_sendsDataAndClosesSubscription() {
         // GIVEN
         ExecutorService testExecutor = Executors.newSingleThreadExecutor();
-        logsService = new LogsService(web3jMock, testExecutor);
+        logsService = new LogsService(web3jMock, 500, testExecutor);
 
         LogsRequest historicalRequest = new LogsRequest();
         BigInteger startBlock = BigInteger.valueOf(100);
@@ -108,7 +108,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_realtimeRequest_sendsBackfillAndDoesNotCloseSubscription() {
         // GIVEN
-        logsService = new LogsService(web3jMock);
+        logsService = new LogsService(web3jMock, 500);
 
         List<String> contractAddresses = List.of("0xspecificaddress");
         LogsRequest realtimeRequest = new LogsRequest();
@@ -187,7 +187,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithNullAddress_createsFilterForAllAddresses() {
         // GIVEN
-        logsService = new LogsService(web3jMock);
+        logsService = new LogsService(web3jMock, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
@@ -222,7 +222,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithOnlySpecificAddresses_createsSpecificFilter() {
         // GIVEN
-        logsService = new LogsService(web3jMock);
+        logsService = new LogsService(web3jMock, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
@@ -257,7 +257,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithNullTopics_createsFilterForAllTopics() {
         // GIVEN
-        logsService = new LogsService(web3jMock);
+        logsService = new LogsService(web3jMock, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
@@ -292,7 +292,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithOnlySpecificTopics_createsSpecificFilter() {
         // GIVEN
-        logsService = new LogsService(web3jMock);
+        logsService = new LogsService(web3jMock, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);

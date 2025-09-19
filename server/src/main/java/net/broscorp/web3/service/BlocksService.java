@@ -28,15 +28,18 @@ public class BlocksService {
     private final Web3j web3j;
     private final ExecutorService workerExecutor;
     private final List<BlockSubscription> subscriptions = new CopyOnWriteArrayList<>();
+    private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
 
-    public BlocksService(Web3j web3j) {
+    public BlocksService(Web3j web3j, int maxBlockRange) {
         this.web3j = web3j;
+        this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = Executors.newVirtualThreadPerTaskExecutor();
     }
 
-    BlocksService(Web3j web3j, ExecutorService executor) {
+    BlocksService(Web3j web3j, int maxBlockRange, ExecutorService executor) {
         this.web3j = web3j;
+        this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
     }
 
@@ -96,8 +99,6 @@ public class BlocksService {
         }
 
         try {
-            // TODO optimize it in some way, I do not think just pushing all the historical data a client requests at once is a viable solution
-            // e.g. Something like Infura even disallows requests that return more than 10_000 entries
             BigInteger startBlock = request.getStartBlock();
             BigInteger endBlock = (request.getEndBlock() != null)
                     ? request.getEndBlock()
@@ -106,7 +107,19 @@ public class BlocksService {
             boolean needsHistoricalData = startBlock != null && startBlock.compareTo(endBlock) < 0;
 
             if (needsHistoricalData) {
-                pushHistoricalData(subscription, startBlock, endBlock);
+                BigInteger firstBatchBlock = startBlock;
+                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).compareTo(endBlock) <= 0
+                        ? startBlock.add(maxBlockRange)
+                        : endBlock;
+
+                while (firstBatchBlock.compareTo(endBlock) <= 0) {
+                    pushHistoricalData(subscription, firstBatchBlock, lastBatchBlock);
+                    firstBatchBlock = lastBatchBlock.add(BigInteger.ONE);
+                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).compareTo(endBlock) <= 0
+                            ? lastBatchBlock.add(maxBlockRange)
+                            : endBlock;
+                }
+                subscription.completeBackfill();
             }
 
             if (!isRealtime) {
@@ -136,7 +149,6 @@ public class BlocksService {
         }
 
         subscription.sendHistorical(requestResults);
-        subscription.completeBackfill();
         log.info("Finished historical backfill for client. Sent {} blocks.", requestResults.size());
     }
 }
