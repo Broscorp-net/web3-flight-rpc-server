@@ -109,15 +109,15 @@ public class BlocksService {
 
             if (needsHistoricalData) {
                 BigInteger firstBatchBlock = startBlock;
-                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).compareTo(endBlock) <= 0
-                        ? startBlock.add(maxBlockRange)
+                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).subtract(BigInteger.ONE).compareTo(endBlock) <= 0
+                        ? startBlock.add(maxBlockRange).subtract(BigInteger.ONE)
                         : endBlock;
 
                 while (firstBatchBlock.compareTo(endBlock) <= 0) {
                     pushHistoricalData(subscription, firstBatchBlock, lastBatchBlock);
                     firstBatchBlock = lastBatchBlock.add(BigInteger.ONE);
-                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).compareTo(endBlock) <= 0
-                            ? lastBatchBlock.add(maxBlockRange)
+                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).subtract(BigInteger.ONE).compareTo(endBlock) <= 0
+                            ? lastBatchBlock.add(maxBlockRange).subtract(BigInteger.ONE)
                             : endBlock;
                 }
                 subscription.completeBackfill();
