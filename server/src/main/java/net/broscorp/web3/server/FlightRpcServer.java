@@ -80,7 +80,7 @@ public class FlightRpcServer {
              FlightServer server = FlightServer.builder()
                      .allocator(allocator)
                      .location(serverLocation)
-                     .producer(new Producer(new LogsService(web3, webSocketService, maxBlockRange),
+                     .producer(new Producer(new LogsService(web3, maxBlockRange, webSocketService),
                              new BlocksService(web3, maxBlockRange),
                              new SubscriptionFactory(allocator, new Converter(), executorService)))
                      .build()) {

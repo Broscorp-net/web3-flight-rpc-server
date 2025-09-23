@@ -40,14 +40,19 @@ public class LogsService {
     private final BigInteger maxBlockRange;
     private final List<Disposable> aggregatedSubscriptions = new ArrayList<>();
 
-    public LogsService(Web3j web3j, WebSocketService webSocketService, int maxBlockRange) {
-        this.web3j = web3j;
-        this.webSocketService = webSocketService;
-        this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
-        this.workerExecutor = Executors.newVirtualThreadPerTaskExecutor();
+    public LogsService(Web3j web3j, int maxBlockRange) {
+        this(web3j, maxBlockRange, null, Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    LogsService(Web3j web3j, WebSocketService webSocketService, int maxBlockRange, ExecutorService executor) {
+    public LogsService(Web3j web3j, int maxBlockRange, ExecutorService executor) {
+        this(web3j, maxBlockRange, null, executor);
+    }
+
+    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService) {
+        this(web3j, maxBlockRange, webSocketService, Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService, ExecutorService executor) {
         this.web3j = web3j;
         this.webSocketService = webSocketService;
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
