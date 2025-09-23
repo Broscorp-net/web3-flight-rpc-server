@@ -40,6 +40,9 @@ public class LogsService {
     private final BigInteger maxBlockRange;
     private final List<Disposable> aggregatedSubscriptions = new ArrayList<>();
 
+    private static class LogResponse extends Response<Log> { }
+    private static class LogNotification extends Notification<Log> { }
+
     public LogsService(Web3j web3j, int maxBlockRange) {
         this(web3j, maxBlockRange, null, Executors.newVirtualThreadPerTaskExecutor());
     }
@@ -110,9 +113,6 @@ public class LogsService {
         aggregatedSubscriptions.add(disposable);
         log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
     }
-
-    public static class LogResponse extends Response<Log> { }
-    public static class LogNotification extends Notification<Log> { }
 
     private void subscribeViaWebSocket() {
         boolean subscribeAllAddresses = subscriptions.stream()
