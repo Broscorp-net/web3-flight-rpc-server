@@ -18,7 +18,7 @@ import java.nio.charset.StandardCharsets;
 @Slf4j
 public class FlightRpcClient {
     public static void main(String[] args) {
-        String host = "yummybait-nlb-dae443a46c8032b5.elb.eu-central-1.amazonaws.com";
+        String host = "127.0.0.1";
         int port = 8815;
         if (args.length == 2) {
             host = args[0];
