@@ -129,6 +129,7 @@ public abstract class Subscription<T, R extends ClientRequest> implements AutoCl
      * when it should start doing so.
      */
     public void completeBackfill() {
+        log.info("Transitioning subscription to realtime for: {}", clientRequest);
         if (currentState.get() == State.BACKFILLING) {
             List<T> bufferedItems;
             synchronized (stateLock) {

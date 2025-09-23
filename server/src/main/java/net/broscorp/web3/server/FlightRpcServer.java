@@ -11,7 +11,7 @@ import org.apache.arrow.flight.Location;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.web3j.protocol.Web3j;
-import org.web3j.protocol.http.HttpService;
+import org.web3j.protocol.websocket.WebSocketService;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,15 +65,22 @@ public class FlightRpcServer {
 
         Location serverLocation = Location.forGrpcInsecure("0.0.0.0", flightPort);
 
-        // TODO add configuration to run ipc/ws
-        Web3j web3 = Web3j.build(new HttpService(ethereumNodeUrl));
+        WebSocketService webSocketService = new WebSocketService(ethereumNodeUrl, true);
+        try {
+            webSocketService.connect();
+        } catch (Exception e) {
+            log.error("Failed to connect to Ethereum WebSocket node: {}", e.getMessage(), e);
+            System.exit(-1);
+        }
+
+        Web3j web3 = Web3j.build(webSocketService);
 
         try (ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
              BufferAllocator allocator = new RootAllocator();
              FlightServer server = FlightServer.builder()
                      .allocator(allocator)
                      .location(serverLocation)
-                     .producer(new Producer(new LogsService(web3, maxBlockRange),
+                     .producer(new Producer(new LogsService(web3, webSocketService, maxBlockRange),
                              new BlocksService(web3, maxBlockRange),
                              new SubscriptionFactory(allocator, new Converter(), executorService)))
                      .build()) {
@@ -93,6 +100,8 @@ public class FlightRpcServer {
 
         } catch (Exception e) {
             throw new RuntimeException("Failed to start Flight server", e);
+        } finally {
+            webSocketService.close();
         }
     }
 }
