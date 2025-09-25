@@ -38,7 +38,7 @@ public class LogsService {
     private final List<LogSubscription> subscriptions = new CopyOnWriteArrayList<>();
     private final WebSocketService webSocketService;
     private final BigInteger maxBlockRange;
-    private final List<Disposable> aggregatedSubscriptions = new ArrayList<>();
+    private Disposable aggregatedSubscription;
 
     private static class LogResponse extends Response<Log> { }
     private static class LogNotification extends Notification<Log> { }
@@ -88,33 +88,33 @@ public class LogsService {
     }
 
     private synchronized void rebuildAggregatedWeb3jSubscription() {
-        aggregatedSubscriptions.forEach(Disposable::dispose);
-        aggregatedSubscriptions.clear();
+        if (aggregatedSubscription != null) {
+            aggregatedSubscription.dispose();
+            aggregatedSubscription = null;
+            log.info("No active subscriptions. Aggregated subscription not created.");
+        }
 
         if (subscriptions.isEmpty()) {
-            log.info("No active subscriptions. Aggregated subscription not created.");
             return;
         }
 
-        // Prefer true WebSocket subscriptions to avoid HTTP polling filters.
         if (webSocketService != null) {
-            subscribeViaWebSocket();
+            // Prefer true WebSocket subscriptions to avoid HTTP polling filters.
+            aggregatedSubscription = subscribeViaWebSocket();
             log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
-            return;
+        } else {
+            // Fallback: Build filter and use ethLogFlowable (may use HTTP-style filters).
+            EthFilter aggregatedFilter = buildRealtimeFilter();
+            aggregatedSubscription = web3j.ethLogFlowable(aggregatedFilter)
+                    .subscribe(
+                            this::onNewRealtimeLog,
+                            err -> log.error("Realtime subscription error", err)
+                    );
+            log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
         }
-
-        // Fallback: Build filter and use ethLogFlowable (may use HTTP-style filters).
-        EthFilter aggregatedFilter = buildRealtimeFilter();
-        Disposable disposable = web3j.ethLogFlowable(aggregatedFilter)
-                .subscribe(
-                        this::onNewRealtimeLog,
-                        err -> log.error("Realtime subscription error", err)
-                );
-        aggregatedSubscriptions.add(disposable);
-        log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
     }
 
-    private void subscribeViaWebSocket() {
+    private Disposable subscribeViaWebSocket() {
         boolean subscribeAllAddresses = subscriptions.stream()
                 .map(Subscription::getClientRequest)
                 .anyMatch(req -> req.getContractAddresses() == null || req.getContractAddresses().isEmpty());
@@ -156,7 +156,10 @@ public class LogsService {
                 LogResponse.class
         );
 
-        Disposable disposable = webSocketService.subscribe(
+        log.info("Created WebSocket subscription: {} addresses, {} topics (all in slot 0).",
+                allAddresses.size(), allTopics.size());
+
+        return webSocketService.subscribe(
                         request,
                         "eth_unsubscribe",
                         LogNotification.class
@@ -171,11 +174,6 @@ public class LogsService {
                         this::onNewRealtimeLog,
                         err -> log.error("Realtime subscription error", err)
                 );
-
-        aggregatedSubscriptions.add(disposable);
-
-        log.info("Created WebSocket subscription: {} addresses, {} topics (all in slot 0).",
-                allAddresses.size(), allTopics.size());
     }
 
 
