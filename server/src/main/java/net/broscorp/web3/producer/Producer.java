@@ -1,5 +1,6 @@
 package net.broscorp.web3.producer;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import net.broscorp.web3.dto.request.BlocksRequest;
@@ -35,7 +36,19 @@ public class Producer extends NoOpFlightProducer {
     @Override
     public void getStream(CallContext context, Ticket ticket, ServerStreamListener listener) {
         try {
-            ClientRequest request = MAPPER.readValue(ticket.getBytes(), ClientRequest.class);
+            JsonNode node = MAPPER.readTree(ticket.getBytes());
+            ClientRequest request = switch (node.get("dataset").asText()) {
+                case "logs" -> MAPPER.treeToValue(node, LogsRequest.class);
+                case "blocks" -> MAPPER.treeToValue(node, BlocksRequest.class);
+                default -> throw new IllegalArgumentException("Unknown dataset type");
+            };
+            JsonNode startNode = node.get("startBlock");
+            JsonNode endNode = node.get("endBlock");
+
+            request.setDataset(node.get("dataset").asText());
+            request.setStartBlock(startNode != null && !startNode.isNull() ? startNode.bigIntegerValue() : null);
+            request.setEndBlock(endNode != null && !endNode.isNull() ? endNode.bigIntegerValue() : null);
+            log.info("Parsed request: {}", request);
 
             switch (request) {
                 case LogsRequest logRequest ->

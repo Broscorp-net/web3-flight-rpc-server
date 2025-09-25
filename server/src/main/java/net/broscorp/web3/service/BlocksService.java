@@ -48,7 +48,7 @@ public class BlocksService {
      * and starts processing it according to the associated request.
      */
     public void registerNewSubscription(BlockSubscription subscription) {
-        log.info("Block subscription registration for request: {}. Total active: {}", subscription.getClientRequest(),
+        log.info("Block subscription registration for request: {}. Previously active: {}", subscription.getClientRequest(),
                 subscriptions.size());
 
         subscription.setOnCancelHandler(() -> handleSubscriptionRemoval(subscription));
@@ -91,38 +91,39 @@ public class BlocksService {
 
     private void processNewSubscription(BlockSubscription subscription) {
         BlocksRequest request = subscription.getClientRequest();
-        boolean isRealtime = request.isRealtime();
+        boolean awaitingForRealTimeData = request.awaitingForRealTimeData();
 
-        if (isRealtime) {
+        if (awaitingForRealTimeData) {
             subscriptions.add(subscription);
             rebuildAggregatedWeb3jSubscription();
         }
 
         try {
-            BigInteger startBlock = request.getStartBlock();
+            log.info("Starting historical subscription for blocks: {}", request);
             BigInteger endBlock = (request.getEndBlock() != null)
                     ? request.getEndBlock()
                     : web3j.ethBlockNumber().send().getBlockNumber();
+            BigInteger startBlock = request.getStartBlock() != null ? request.getStartBlock() : endBlock;
 
             boolean needsHistoricalData = startBlock != null && startBlock.compareTo(endBlock) < 0;
 
             if (needsHistoricalData) {
                 BigInteger firstBatchBlock = startBlock;
-                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).compareTo(endBlock) <= 0
-                        ? startBlock.add(maxBlockRange)
+                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).subtract(BigInteger.ONE).compareTo(endBlock) <= 0
+                        ? startBlock.add(maxBlockRange).subtract(BigInteger.ONE)
                         : endBlock;
 
                 while (firstBatchBlock.compareTo(endBlock) <= 0) {
                     pushHistoricalData(subscription, firstBatchBlock, lastBatchBlock);
                     firstBatchBlock = lastBatchBlock.add(BigInteger.ONE);
-                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).compareTo(endBlock) <= 0
-                            ? lastBatchBlock.add(maxBlockRange)
+                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).subtract(BigInteger.ONE).compareTo(endBlock) <= 0
+                            ? lastBatchBlock.add(maxBlockRange).subtract(BigInteger.ONE)
                             : endBlock;
                 }
                 subscription.completeBackfill();
             }
 
-            if (!isRealtime) {
+            if (!awaitingForRealTimeData) {
                 log.info("Finished historical request for blocks. {}", request);
                 subscription.close();
             }

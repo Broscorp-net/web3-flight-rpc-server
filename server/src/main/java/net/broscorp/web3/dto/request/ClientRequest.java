@@ -31,7 +31,7 @@ sealed public abstract class ClientRequest permits BlocksRequest, LogsRequest {
         return startBlock != null;
     }
 
-    public boolean isRealtime() {
+    public boolean awaitingForRealTimeData() {
         return endBlock == null;
     }
 }

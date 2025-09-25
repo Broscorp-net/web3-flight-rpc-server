@@ -8,15 +8,16 @@ import net.broscorp.web3.subscription.Subscription;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.Request;
+import org.web3j.protocol.core.Response;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.EthLog;
 import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.protocol.websocket.WebSocketService;
+import org.web3j.protocol.websocket.events.Notification;
 
 import java.math.BigInteger;
-import java.util.Collection;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,17 +36,28 @@ public class LogsService {
     private final Web3j web3j;
     private final ExecutorService workerExecutor;
     private final List<LogSubscription> subscriptions = new CopyOnWriteArrayList<>();
+    private final WebSocketService webSocketService;
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
 
+    private static class LogResponse extends Response<Log> { }
+    private static class LogNotification extends Notification<Log> { }
+
     public LogsService(Web3j web3j, int maxBlockRange) {
-        this.web3j = web3j;
-        this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
-        this.workerExecutor = Executors.newVirtualThreadPerTaskExecutor();
+        this(web3j, maxBlockRange, null, Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    LogsService(Web3j web3j, int maxBlockRange, ExecutorService executor) {
+    public LogsService(Web3j web3j, int maxBlockRange, ExecutorService executor) {
+        this(web3j, maxBlockRange, null, executor);
+    }
+
+    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService) {
+        this(web3j, maxBlockRange, webSocketService, Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService, ExecutorService executor) {
         this.web3j = web3j;
+        this.webSocketService = webSocketService;
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
     }
@@ -54,7 +66,7 @@ public class LogsService {
      * Registers a new subscription for logs and starts processing it according to the associated request.
      */
     public void registerNewSubscription(LogSubscription subscription) {
-        log.info("Log subscription registration for request: {}. Total active: {}", subscription.getClientRequest(),
+        log.info("Log subscription registration for request: {}. Previously active: {}", subscription.getClientRequest(),
                 subscriptions.size());
 
         subscription.setOnCancelHandler(() -> handleSubscriptionRemoval(subscription));
@@ -76,77 +88,137 @@ public class LogsService {
     }
 
     private synchronized void rebuildAggregatedWeb3jSubscription() {
+        if (aggregatedSubscription != null) {
+            aggregatedSubscription.dispose();
+            aggregatedSubscription = null;
+            log.info("No active subscriptions. Aggregated subscription not created.");
+        }
+
         if (subscriptions.isEmpty()) {
-            if (aggregatedSubscription != null) {
-                log.info("No active log listeners. Tearing down main aggregated subscription.");
-                aggregatedSubscription.dispose();
-                aggregatedSubscription = null;
-            }
             return;
         }
 
-        // Determine if we need to subscribe to all logs.
-        boolean shouldSubscribeToAllAddresses = subscriptions.stream()
-                .map(Subscription::getClientRequest)
-                .anyMatch(req -> (req.getContractAddresses() == null || req.getContractAddresses().isEmpty()));
-        boolean shouldSubscribeToAllTopics = subscriptions.stream()
-                .map(Subscription::getClientRequest)
-                .anyMatch(req -> (req.getTopics() == null || req.getTopics().isEmpty()));
-
-        EthFilter aggregatedFilter;
-
-        if (shouldSubscribeToAllAddresses && shouldSubscribeToAllTopics) {
-            log.warn("A wildcard subscription is active. Fetching ALL logs from node provider.");
-            aggregatedFilter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, (List<String>) null);
-        } else if (shouldSubscribeToAllTopics) {
-            log.warn("A subscription to all topics is active.");
-            List<String> allAddresses = subscriptions.stream()
-                    .map(sub -> sub.getClientRequest().getContractAddresses())
-                    .filter(java.util.Objects::nonNull)
-                    .flatMap(Collection::stream)
-                    .distinct()
-                    .toList();
-            log.info("All subscriptions are address-specific. Rebuilding aggregated log filter for {} addresses.", allAddresses.size());
-
-            aggregatedFilter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, allAddresses);
-        } else if (shouldSubscribeToAllAddresses) {
-            log.warn("A subscription to all addresses is active.");
-            String[] specifiedTopics = subscriptions.stream()
-                    .map(sub -> sub.getClientRequest().getTopics())
-                    .filter(java.util.Objects::nonNull)
-                    .flatMap(Collection::stream)
-                    .distinct()
-                    .toArray(String[]::new);
-            log.info("All subscriptions are topics-specific. Rebuilding aggregated log filter for {} topics.", specifiedTopics.length);
-
-            aggregatedFilter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, (List<String>) null);
-            aggregatedFilter.addOptionalTopics(specifiedTopics);
+        if (webSocketService != null) {
+            // Prefer true WebSocket subscriptions to avoid HTTP polling filters.
+            aggregatedSubscription = subscribeViaWebSocket();
+            log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
         } else {
-            List<String> allAddresses = subscriptions.stream()
-                    .map(sub -> sub.getClientRequest().getContractAddresses())
-                    .filter(java.util.Objects::nonNull)
-                    .flatMap(Collection::stream)
-                    .distinct()
-                    .toList();
+            // Fallback: Build filter and use ethLogFlowable (may use HTTP-style filters).
+            EthFilter aggregatedFilter = buildRealtimeFilter();
+            aggregatedSubscription = web3j.ethLogFlowable(aggregatedFilter)
+                    .subscribe(
+                            this::onNewRealtimeLog,
+                            err -> log.error("Realtime subscription error", err)
+                    );
+            log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
+        }
+    }
 
-            String[] specifiedTopics = subscriptions.stream()
-                    .map(sub -> sub.getClientRequest().getTopics())
-                    .filter(java.util.Objects::nonNull)
-                    .flatMap(Collection::stream)
-                    .distinct()
-                    .toArray(String[]::new);
+    private Disposable subscribeViaWebSocket() {
+        boolean subscribeAllAddresses = subscriptions.stream()
+                .map(Subscription::getClientRequest)
+                .anyMatch(req -> req.getContractAddresses() == null || req.getContractAddresses().isEmpty());
 
-            log.info("All subscriptions are topics and address-specific. Rebuilding aggregated log filter for {} addresses, {} topics.", allAddresses.size(), specifiedTopics.length);
-            aggregatedFilter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, allAddresses);
-            aggregatedFilter.addOptionalTopics(specifiedTopics);
+        boolean subscribeAllTopics = subscriptions.stream()
+                .map(Subscription::getClientRequest)
+                .anyMatch(req -> req.getTopics() == null || req.getTopics().isEmpty());
+
+        List<String> allAddresses = subscriptions.stream()
+                .map(sub -> sub.getClientRequest().getContractAddresses())
+                .filter(Objects::nonNull)
+                .flatMap(Collection::stream)
+                .distinct()
+                .toList();
+
+        List<String> allTopics = subscriptions.stream()
+                .map(sub -> sub.getClientRequest().getTopics())
+                .filter(Objects::nonNull)
+                .flatMap(Collection::stream)
+                .distinct()
+                .toList();
+
+        Map<String, Object> filterParams = new LinkedHashMap<>();
+
+        if (!subscribeAllAddresses && !allAddresses.isEmpty()) {
+            filterParams.put("address", allAddresses);
         }
 
-        if (aggregatedSubscription != null) {
-            aggregatedSubscription.dispose();
+        // Topics: Ethereum allows up to 4 positions.
+        // Put all event signatures into position 0.
+        if (!subscribeAllTopics && !allTopics.isEmpty()) {
+            filterParams.put("topics", List.of(allTopics));
         }
 
-        aggregatedSubscription = web3j.ethLogFlowable(aggregatedFilter)
-                .subscribe(this::onNewRealtimeLog, err -> log.error("Aggregated log subscription error", err));
+        Request<?, LogResponse> request = new Request<>(
+                "eth_subscribe",
+                List.of("logs", filterParams),
+                webSocketService,
+                LogResponse.class
+        );
+
+        log.info("Created WebSocket subscription: {} addresses, {} topics (all in slot 0).",
+                allAddresses.size(), allTopics.size());
+
+        return webSocketService.subscribe(
+                        request,
+                        "eth_unsubscribe",
+                        LogNotification.class
+                )
+                .map(notif -> {
+                    Log logObj = notif.getParams().getResult();
+                    log.debug("Realtime log received: block={}, tx={}, topics={}",
+                            logObj.getBlockNumber(), logObj.getTransactionHash(), logObj.getTopics());
+                    return logObj;
+                })
+                .subscribe(
+                        this::onNewRealtimeLog,
+                        err -> log.error("Realtime subscription error", err)
+                );
+    }
+
+
+    private EthFilter buildRealtimeFilter() {
+        boolean subscribeAllAddresses = subscriptions.stream()
+                .map(Subscription::getClientRequest)
+                .anyMatch(req -> req.getContractAddresses() == null || req.getContractAddresses().isEmpty());
+
+        boolean subscribeAllTopics = subscriptions.stream()
+                .map(Subscription::getClientRequest)
+                .anyMatch(req -> req.getTopics() == null || req.getTopics().isEmpty());
+
+        List<String> allAddresses = subscriptions.stream()
+                .map(sub -> sub.getClientRequest().getContractAddresses())
+                .filter(Objects::nonNull)
+                .flatMap(Collection::stream)
+                .distinct()
+                .toList();
+
+        List<String> allTopics = subscriptions.stream()
+                .map(sub -> sub.getClientRequest().getTopics())
+                .filter(Objects::nonNull)
+                .flatMap(Collection::stream)
+                .distinct()
+                .toList();
+
+        EthFilter filter;
+
+        if (subscribeAllAddresses && subscribeAllTopics) {
+            log.warn("Wildcard subscription active: all addresses & topics. Fetching ALL logs from node.");
+            filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, (List<String>) null);
+        } else if (subscribeAllAddresses) {
+            log.warn("Subscription to all addresses active. Filtering topics only.");
+            filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, (List<String>) null);
+            filter.addOptionalTopics(allTopics.toArray(new String[0]));
+        } else if (subscribeAllTopics) {
+            log.warn("Subscription to all topics active. Filtering addresses only.");
+            filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, allAddresses);
+        } else {
+            log.info("Filtering by {} addresses and {} topics.", allAddresses.size(), allTopics.size());
+            filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, allAddresses);
+            filter.addOptionalTopics(allTopics.toArray(new String[0]));
+        }
+
+        return filter;
     }
 
     private void onNewRealtimeLog(Log newLog) {
@@ -158,38 +230,41 @@ public class LogsService {
 
     private void processNewSubscription(LogSubscription subscription) {
         LogsRequest request = subscription.getClientRequest();
-        boolean isRealtime = request.isRealtime();
+        boolean awaitingForRealTimeData = request.awaitingForRealTimeData();
 
-        if (isRealtime) {
+        if (awaitingForRealTimeData) {
             subscriptions.add(subscription);
             rebuildAggregatedWeb3jSubscription();
         }
 
         try {
-            BigInteger startBlock = request.getStartBlock();
             BigInteger endBlock = (request.getEndBlock() != null)
                     ? request.getEndBlock()
                     : web3j.ethBlockNumber().send().getBlockNumber();
+            BigInteger startBlock = request.getStartBlock() != null ? request.getStartBlock() : endBlock;
+            log.info("Last chain block: {}, starting from: {}", endBlock, startBlock);
 
-            boolean canFetchHistoricalData = startBlock != null && startBlock.compareTo(endBlock) <= 0;
+            boolean canFetchHistoricalData = startBlock != null && startBlock.compareTo(endBlock) < 0;
 
             if (canFetchHistoricalData) {
+                log.info("Fetching historical block range: {} - {}", startBlock, endBlock);
                 BigInteger firstBatchBlock = startBlock;
-                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).compareTo(endBlock) <= 0
-                        ? startBlock.add(maxBlockRange)
+                BigInteger lastBatchBlock = startBlock.add(maxBlockRange).subtract(BigInteger.ONE).compareTo(endBlock) <= 0
+                        ? startBlock.add(maxBlockRange).subtract(BigInteger.ONE)
                         : endBlock;
 
                 while (firstBatchBlock.compareTo(endBlock) <= 0) {
+                    log.info("Fetching historical data for block range: {} - {}", firstBatchBlock, lastBatchBlock);
                     pushHistoricalData(subscription, firstBatchBlock, lastBatchBlock);
                     firstBatchBlock = lastBatchBlock.add(BigInteger.ONE);
-                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).compareTo(endBlock) <= 0
-                            ? lastBatchBlock.add(maxBlockRange)
+                    lastBatchBlock = lastBatchBlock.add(maxBlockRange).subtract(BigInteger.ONE).compareTo(endBlock) <= 0
+                            ? lastBatchBlock.add(maxBlockRange).subtract(BigInteger.ONE)
                             : endBlock;
                 }
                 subscription.completeBackfill();
             }
 
-            if (!isRealtime) {
+            if (!awaitingForRealTimeData) {
                 log.info("Finished historical request for logs. {}", request);
                 subscription.close();
             }

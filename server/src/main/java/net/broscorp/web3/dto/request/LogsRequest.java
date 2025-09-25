@@ -2,6 +2,7 @@ package net.broscorp.web3.dto.request;
 
 import lombok.Data;
 import lombok.EqualsAndHashCode;
+import lombok.ToString;
 
 import java.util.List;
 
@@ -18,6 +19,7 @@ import java.util.List;
  * </ul>
  */
 @Data
+@ToString(callSuper = true)
 @EqualsAndHashCode(callSuper = true)
 public final class LogsRequest extends ClientRequest {
     private List<String> contractAddresses;
