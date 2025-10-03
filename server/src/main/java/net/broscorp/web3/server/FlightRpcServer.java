@@ -1,6 +1,8 @@
 package net.broscorp.web3.server;
 
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.cache.S3BlockLogsCache;
+import net.broscorp.web3.cache.scheduler.S3CacheUploadScheduler;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.producer.Producer;
 import net.broscorp.web3.service.BlocksService;
@@ -13,6 +15,7 @@ import org.apache.arrow.memory.RootAllocator;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.websocket.WebSocketService;
 
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -37,71 +40,123 @@ import java.util.concurrent.Executors;
  */
 @Slf4j
 public class FlightRpcServer {
+    private static String flightPortString = System.getenv("FLIGHT_PORT");
+    private static String ethereumNodeUrl = System.getenv("ETHEREUM_NODE_URL");
+    private static String maxBlockRangeString = System.getenv("MAX_BLOCK_RANGE");
+    private static String cacheBucketName = System.getenv("CACHE_BUCKET");
+    private static String cacheFileKey = System.getenv("CACHE_FILE_KEY");
+    private static String defaultRegion = System.getenv("AWS_DEFAULT_REGION");
 
     public static void main(String[] args) {
         runBlocksAndLogsProducer(args);
     }
 
     private static void runBlocksAndLogsProducer(String[] args) {
-        String flightPortString = System.getenv("FLIGHT_PORT");
-        String ethereumNodeUrl = System.getenv("ETHEREUM_NODE_URL");
-        String maxBlockRangeString = System.getenv("MAX_BLOCK_RANGE");
 
-        if (args.length == 3) {
+        if (args.length == 5) {
             ethereumNodeUrl = args[0];
             flightPortString = args[1];
             maxBlockRangeString = args[2];
+            cacheBucketName = args[3];
+            defaultRegion = args[4];
         }
 
         int flightPort = flightPortString == null ? 8815 : Integer.parseInt(flightPortString);
-        int maxBlockRange = maxBlockRangeString == null ? 500 : Integer.parseInt(maxBlockRangeString);
 
-        if (ethereumNodeUrl == null) {
+        if (ethereumNodeUrl == null || ethereumNodeUrl.isBlank()) {
             log.error("ETHEREUM_NODE_URL is null");
-            System.exit(-1);
+            throw new IllegalStateException("ETHEREUM_NODE_URL environment variable must be set");
+        }
+
+        if (cacheBucketName == null || cacheBucketName.isBlank()) {
+            log.error("CACHE_BUCKET is null");
+            throw new IllegalStateException("CACHE_BUCKET environment variable must be set");
+        }
+
+        if (defaultRegion == null || defaultRegion.isBlank()) {
+            log.error("AWS_DEFAULT_REGION is null");
+            throw new IllegalStateException("AWS_DEFAULT_REGION environment variable must be set");
         }
 
         log.info("Starting Ethereum to Arrow Flight Server, node url: {}", ethereumNodeUrl);
 
         Location serverLocation = Location.forGrpcInsecure("0.0.0.0", flightPort);
 
-        WebSocketService webSocketService = new WebSocketService(ethereumNodeUrl, true);
-        try {
-            webSocketService.connect();
-        } catch (Exception e) {
-            log.error("Failed to connect to Ethereum WebSocket node: {}", e.getMessage(), e);
-            System.exit(-1);
+        while (true) {
+            try {
+                startFlightServer(serverLocation);
+                break; // normal exit (server.awaitTermination ended)
+            } catch (IOException e) {
+                if (e.getMessage().contains("Connection was closed") || e.getMessage().contains("Realtime subscription error")) {
+                    log.error("Websocket connection failed, retrying in 5s", e);
+                    try {
+                        Thread.sleep(5000);
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                } else {
+                    log.error("Unexpected IO Exception", e);
+                    break;
+                }
+            } catch (Exception e) {
+                log.error("Server failed: ", e);
+                break;
+            }
         }
+    }
 
-        Web3j web3 = Web3j.build(webSocketService);
+    private static void startFlightServer(Location serverLocation) throws Exception {
+        int maxBlockRange = maxBlockRangeString == null ? 500 : Integer.parseInt(maxBlockRangeString);
+        S3BlockLogsCache s3BlockLogsCache = new S3BlockLogsCache(cacheBucketName, cacheFileKey, defaultRegion);
+        S3CacheUploadScheduler uploader = new S3CacheUploadScheduler(s3BlockLogsCache);
+        uploader.start();
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            uploader.stop();
+            s3BlockLogsCache.shutdown();
+        }));
+
+
+        WebSocketService webSocketService = null;
+        Web3j web3 = null;
 
         try (ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
-             BufferAllocator allocator = new RootAllocator();
-             FlightServer server = FlightServer.builder()
-                     .allocator(allocator)
-                     .location(serverLocation)
-                     .producer(new Producer(new LogsService(web3, maxBlockRange, webSocketService),
-                             new BlocksService(web3, maxBlockRange),
-                             new SubscriptionFactory(allocator, new Converter(), executorService)))
-                     .build()) {
+             BufferAllocator allocator = new RootAllocator()) {
 
+            webSocketService = new WebSocketService(ethereumNodeUrl, true);
+            webSocketService.connect();
 
-            server.start();
+            web3 = Web3j.build(webSocketService);
 
-            Location location = server.getLocation();
-            log.info("Flight server started on {}", location.getUri());
+            try (FlightServer server = FlightServer.builder()
+                    .allocator(allocator)
+                    .location(serverLocation)
+                    .producer(new Producer(
+                            new LogsService(web3, s3BlockLogsCache, maxBlockRange, webSocketService),
+                            // TODO Implement caching and batch size for BlockService
+                            new BlocksService(web3, maxBlockRange),
+                            new SubscriptionFactory(allocator, new Converter(), executorService)))
+                    .build()) {
 
-            try {
+                server.start();
+                log.info("Flight server started on {}", server.getLocation().getUri());
+
                 server.awaitTermination();
-            } catch (InterruptedException e) {
-                log.error("Flight server interrupted: {}", e.getMessage());
-                Thread.currentThread().interrupt();
             }
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to start Flight server", e);
         } finally {
-            webSocketService.close();
+            if (webSocketService != null) {
+                try {
+                    webSocketService.close();
+                } catch (Exception e) {
+                    log.warn("Error closing WebSocketService", e);
+                }
+            }
+            if (web3 != null) {
+                web3.shutdown();
+            }
+            uploader.stop();
+            s3BlockLogsCache.uploadSnapshot();
         }
     }
 }

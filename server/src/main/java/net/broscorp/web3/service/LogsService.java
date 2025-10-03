@@ -2,6 +2,7 @@ package net.broscorp.web3.service;
 
 import io.reactivex.disposables.Disposable;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.cache.BlockLogsCache;
 import net.broscorp.web3.dto.request.LogsRequest;
 import net.broscorp.web3.subscription.LogSubscription;
 import net.broscorp.web3.subscription.Subscription;
@@ -21,7 +22,6 @@ import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
 
 /**
  * A service that handles Subscriptions to Logs on the Ethereum blockchain.
@@ -38,25 +38,29 @@ public class LogsService {
     private final List<LogSubscription> subscriptions = new CopyOnWriteArrayList<>();
     private final WebSocketService webSocketService;
     private final BigInteger maxBlockRange;
+    private final BlockLogsCache blockLogsCache;
     private Disposable aggregatedSubscription;
+
+    private static final BigInteger BATCH_SIZE = BigInteger.valueOf(100);
 
     private static class LogResponse extends Response<Log> { }
     private static class LogNotification extends Notification<Log> { }
 
-    public LogsService(Web3j web3j, int maxBlockRange) {
-        this(web3j, maxBlockRange, null, Executors.newVirtualThreadPerTaskExecutor());
+    public LogsService(Web3j web3j, BlockLogsCache blockLogsCache, int maxBlockRange) {
+        this(web3j, blockLogsCache, maxBlockRange, null, Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    public LogsService(Web3j web3j, int maxBlockRange, ExecutorService executor) {
-        this(web3j, maxBlockRange, null, executor);
+    public LogsService(Web3j web3j, BlockLogsCache blockLogsCache, int maxBlockRange, ExecutorService executor) {
+        this(web3j, blockLogsCache, maxBlockRange, null, executor);
     }
 
-    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService) {
-        this(web3j, maxBlockRange, webSocketService, Executors.newVirtualThreadPerTaskExecutor());
+    public LogsService(Web3j web3j, BlockLogsCache blockLogsCache, int maxBlockRange, WebSocketService webSocketService) {
+        this(web3j, blockLogsCache, maxBlockRange, webSocketService, Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService, ExecutorService executor) {
+    public LogsService(Web3j web3j, BlockLogsCache blockLogsCache, int maxBlockRange, WebSocketService webSocketService, ExecutorService executor) {
         this.web3j = web3j;
+        this.blockLogsCache = blockLogsCache;
         this.webSocketService = webSocketService;
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
@@ -269,7 +273,7 @@ public class LogsService {
                 subscription.close();
             }
         } catch (Exception e) {
-            log.error("Error during historical backfill", e);
+            log.error("Error during historical backfill, {}", e.getMessage());
             subscription.error(e);
             handleSubscriptionRemoval(subscription);
         }
@@ -281,27 +285,60 @@ public class LogsService {
                 subscription.getClientRequest(),
                 startBlock,
                 endBlock);
-        EthFilter historicalFilter = new EthFilter(
-                DefaultBlockParameter.valueOf(startBlock),
-                DefaultBlockParameter.valueOf(endBlock),
-                Optional.ofNullable(request.getContractAddresses()).orElse(List.of())
-        );
 
-        if (!Objects.isNull(request.getTopics()) && !request.getTopics().isEmpty())
-            historicalFilter.addOptionalTopics(request.getTopics().toArray(new String[0]));
+        List<Log> allLogs = new ArrayList<>();
 
-        EthLog ethLog = web3j.ethGetLogs(historicalFilter).send();
+        BigInteger current = startBlock;
+        while (current.compareTo(endBlock) <= 0) {
+            BigInteger batchEnd = current.add(BATCH_SIZE).subtract(BigInteger.ONE);
+            if (batchEnd.compareTo(endBlock) > 0) {
+                batchEnd = endBlock;
+            }
 
-        if (ethLog.hasError() || ethLog.getLogs() == null) {
-            String errorMessage = ethLog.hasError() ? ethLog.getError().getMessage() : "Node returned a null result for logs query.";
-            log.error("Failed to get historical logs from node: {}", errorMessage);
-            throw new RuntimeException("Failed to fetch historical logs: " + errorMessage);
+            // If entire batch exists in cache, use it
+            if (blockLogsCache.containsRange(current, batchEnd)) {
+                for (BigInteger b = current; b.compareTo(batchEnd) <= 0; b = b.add(BigInteger.ONE)) {
+                    allLogs.addAll(blockLogsCache.get(b));
+                }
+                current = batchEnd.add(BigInteger.ONE);
+                continue;
+            }
+
+            // Cache miss: fetch entire batch from node
+            EthFilter historicalFilter = new EthFilter(
+                    DefaultBlockParameter.valueOf(current),
+                    DefaultBlockParameter.valueOf(batchEnd),
+                    Optional.ofNullable(request.getContractAddresses()).orElse(List.of())
+            );
+
+            if (request.getTopics() != null && !request.getTopics().isEmpty()) {
+                historicalFilter.addOptionalTopics(request.getTopics().toArray(new String[0]));
+            }
+
+            EthLog ethLog = web3j.ethGetLogs(historicalFilter).send();
+            if (ethLog.hasError() || ethLog.getLogs() == null) {
+                String errorMessage = ethLog.hasError() ? ethLog.getError().getMessage() : "Node returned a null result for logs query.";
+                log.error("Failed to get logs from node: {}", errorMessage);
+                throw new RuntimeException("Failed to fetch logs: " + errorMessage);
+            }
+
+            List<Log> logs = Optional.ofNullable(ethLog.getLogs())
+                    .orElse(List.of())
+                    .stream()
+                    .map(lr -> (Log) lr.get())
+                    .toList();
+
+            // Save logs per block in cache
+            for (Log logEntry : logs) {
+                BigInteger blockNum = logEntry.getBlockNumber();
+                blockLogsCache.put(blockNum, List.of(logEntry));
+                allLogs.add(logEntry);
+            }
+
+            current = batchEnd.add(BigInteger.ONE);
         }
 
-        List<Log> historicalLogs = ethLog.getLogs().stream()
-                .map(logResult -> (Log) logResult.get()).collect(Collectors.toList());
-
-        subscription.sendHistorical(historicalLogs);
-        log.info("Finished historical backfill for client. Sent {} logs.", historicalLogs.size());
+        subscription.sendHistorical(allLogs);
+        log.info("Finished historical backfill for client. Sent {} logs.", allLogs.size());
     }
 }
