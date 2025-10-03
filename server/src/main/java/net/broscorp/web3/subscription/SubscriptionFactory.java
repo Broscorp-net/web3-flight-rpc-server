@@ -45,7 +45,7 @@ public class SubscriptionFactory {
      */
     public BlockSubscription create(FlightProducer.ServerStreamListener listener,
                                     BlocksRequest clientRequest) {
-        BufferAllocator subscriptionAllocator = rootAllocator.newChildAllocator("log-sub-" + System.nanoTime(), 0, Long.MAX_VALUE);
+        BufferAllocator subscriptionAllocator = rootAllocator.newChildAllocator("block-sub-" + System.nanoTime(), 0, Long.MAX_VALUE);
         return new BlockSubscription(listener,
                 VectorSchemaRoot.create(converter.getBlockSchema(), subscriptionAllocator),
                 clientRequest,
