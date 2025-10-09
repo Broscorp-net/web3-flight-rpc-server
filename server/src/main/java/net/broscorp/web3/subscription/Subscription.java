@@ -165,6 +165,11 @@ public abstract class Subscription<T, R extends ClientRequest> implements AutoCl
             if (root.getRowCount() > 0) {
                 listener.putNext();
             }
+        } catch (IllegalStateException e) {
+            log.warn("Skipped putNext(): stream already terminated or cancelled");
+            if (!isTerminated.get()) {
+                this.error(e);
+            }
         } catch (Exception e) {
             log.error("Error sending data. Terminating stream for: {}", clientRequest, e);
             this.error(e);
