@@ -186,8 +186,8 @@ public class S3BlockLogsCache implements RestorableBlockLogsCache {
             if (rs.next() && rs.getInt(1) > 10_000) {
                 // Delete oldest 500 rows
                 try (PreparedStatement ps = connection.prepareStatement(
-                        "DELETE FROM " + TABLE + " WHERE id IN (" +
-                                "SELECT id FROM " + TABLE + " ORDER BY created_at ASC LIMIT 500" +
+                        "DELETE FROM " + TABLE + " WHERE block_number IN (" +
+                                "SELECT block_number FROM " + TABLE + " ORDER BY created_at ASC LIMIT 500" +
                                 ")"
                 )) {
                     ps.executeUpdate();
