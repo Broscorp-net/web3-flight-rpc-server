@@ -2,6 +2,7 @@ package net.broscorp.web3.service;
 
 import io.reactivex.Flowable;
 import lombok.SneakyThrows;
+import net.broscorp.web3.cache.InMemoryBlockLogsCache;
 import net.broscorp.web3.dto.request.LogsRequest;
 import net.broscorp.web3.subscription.LogSubscription;
 import org.junit.jupiter.api.Test;
@@ -55,19 +56,18 @@ class LogsServiceTest {
     void registerNewSubscription_historicalRequest_sendsDataAndClosesSubscription() {
         // GIVEN
         ExecutorService testExecutor = Executors.newSingleThreadExecutor();
-        logsService = new LogsService(web3jMock, 500, testExecutor);
+        logsService = new LogsService(web3jMock, new InMemoryBlockLogsCache(), 500, testExecutor);
 
         LogsRequest historicalRequest = new LogsRequest();
         BigInteger startBlock = BigInteger.valueOf(100);
-        BigInteger endBlock = BigInteger.valueOf(200);
+        BigInteger endBlock = BigInteger.valueOf(199);
         historicalRequest.setStartBlock(startBlock);
         historicalRequest.setEndBlock(endBlock);
         when(subscriptionMock.getClientRequest()).thenReturn(historicalRequest);
 
-        Log fakeLog = new Log();
-        fakeLog.setAddress("0x123");
         EthLog.LogObject fakeLogObject = new EthLog.LogObject();
         fakeLogObject.setAddress("0x123");
+        fakeLogObject.setBlockNumber(String.valueOf(BigInteger.valueOf(100)));
         List<EthLog.LogResult> fakeLogResults = List.of(fakeLogObject);
 
         EthLog ethLogMock = mock(EthLog.class);
@@ -108,7 +108,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_realtimeRequest_sendsBackfillAndDoesNotCloseSubscription() {
         // GIVEN
-        logsService = new LogsService(web3jMock, 500);
+        logsService = new LogsService(web3jMock, new InMemoryBlockLogsCache(), 500);
 
         List<String> contractAddresses = List.of("0xspecificaddress");
         LogsRequest realtimeRequest = new LogsRequest();
@@ -187,7 +187,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithNullAddress_createsFilterForAllAddresses() {
         // GIVEN
-        logsService = new LogsService(web3jMock, 500);
+        logsService = new LogsService(web3jMock, null, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
@@ -222,7 +222,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithOnlySpecificAddresses_createsSpecificFilter() {
         // GIVEN
-        logsService = new LogsService(web3jMock, 500);
+        logsService = new LogsService(web3jMock, null, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
@@ -257,7 +257,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithNullTopics_createsFilterForAllTopics() {
         // GIVEN
-        logsService = new LogsService(web3jMock, 500);
+        logsService = new LogsService(web3jMock, null, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
@@ -292,7 +292,7 @@ class LogsServiceTest {
     @SneakyThrows
     void registerNewSubscription_requestWithOnlySpecificTopics_createsSpecificFilter() {
         // GIVEN
-        logsService = new LogsService(web3jMock, 500);
+        logsService = new LogsService(web3jMock, null, 500);
 
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber ethBlockNumberMock = mock(EthBlockNumber.class);
