@@ -13,14 +13,21 @@ import org.web3j.protocol.core.Response;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.EthLog;
 import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.protocol.exceptions.ClientConnectionException;
 import org.web3j.protocol.websocket.WebSocketService;
 import org.web3j.protocol.websocket.events.Notification;
 
 import java.math.BigInteger;
-import java.util.*;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -33,33 +40,72 @@ import java.util.stream.Collectors;
 @Slf4j
 public class LogsService {
 
-    private final Web3j web3j;
+    private final Web3j web3jWebSocket;
+    private volatile Web3j web3jHttp;
+    private final Supplier<Web3j> web3jHttpFactory;
+
     private final ExecutorService workerExecutor;
     private final List<LogSubscription> subscriptions = new CopyOnWriteArrayList<>();
     private final WebSocketService webSocketService;
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
+    private final int sleepBeforeRequestMlSec;
 
-    private static class LogResponse extends Response<Log> { }
-    private static class LogNotification extends Notification<Log> { }
-
-    public LogsService(Web3j web3j, int maxBlockRange) {
-        this(web3j, maxBlockRange, null, Executors.newVirtualThreadPerTaskExecutor());
+    private static class LogResponse extends Response<Log> {
     }
 
-    public LogsService(Web3j web3j, int maxBlockRange, ExecutorService executor) {
-        this(web3j, maxBlockRange, null, executor);
+    private static class LogNotification extends Notification<Log> {
     }
 
-    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService) {
-        this(web3j, maxBlockRange, webSocketService, Executors.newVirtualThreadPerTaskExecutor());
+    public LogsService(Web3j web3jWebSocket,
+                       Supplier<Web3j> web3jHttpFactory,
+                       int maxBlockRange) {
+        this(web3jWebSocket,
+                web3jHttpFactory,
+                maxBlockRange,
+                null,
+                Executors.newVirtualThreadPerTaskExecutor(),
+                500);
     }
 
-    public LogsService(Web3j web3j, int maxBlockRange, WebSocketService webSocketService, ExecutorService executor) {
-        this.web3j = web3j;
+    public LogsService(Web3j web3jWebSocket,
+                       Supplier<Web3j> web3jHttpFactory,
+                       int maxBlockRange,
+                       ExecutorService executor,
+                       int sleepBeforeRequestMlSec) {
+        this(web3jWebSocket,
+                web3jHttpFactory,
+                maxBlockRange,
+                null,
+                executor,
+                sleepBeforeRequestMlSec);
+    }
+
+    public LogsService(Web3j web3jWebSocket,
+                       Supplier<Web3j> web3jHttpFactory,
+                       int maxBlockRange,
+                       WebSocketService webSocketService) {
+        this(web3jWebSocket,
+                web3jHttpFactory,
+                maxBlockRange,
+                webSocketService,
+                Executors.newVirtualThreadPerTaskExecutor(),
+                Integer.parseInt(System.getenv("SLEEP_BEFORE_WEB3_REQUEST_ML_SEC")));
+    }
+
+    public LogsService(Web3j web3jWebSocket,
+                       Supplier<Web3j> web3jHttpFactory,
+                       int maxBlockRange,
+                       WebSocketService webSocketService,
+                       ExecutorService executor,
+                       int sleepBeforeRequestMlSec) {
+        this.web3jWebSocket = web3jWebSocket;
+        this.web3jHttpFactory = web3jHttpFactory;
+        this.web3jHttp = web3jHttpFactory.get();
         this.webSocketService = webSocketService;
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
+        this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
     }
 
     /**
@@ -105,12 +151,19 @@ public class LogsService {
         } else {
             // Fallback: Build filter and use ethLogFlowable (may use HTTP-style filters).
             EthFilter aggregatedFilter = buildRealtimeFilter();
-            aggregatedSubscription = web3j.ethLogFlowable(aggregatedFilter)
+            aggregatedSubscription = web3jWebSocket.ethLogFlowable(aggregatedFilter)
                     .subscribe(
                             this::onNewRealtimeLog,
-                            err -> log.error("Realtime subscription error", err)
+                            (err) -> {
+                                log.error("Realtime subscription error (Fallback): {}. Attempting to re-subscribe in 3s.", err.getMessage());
+                                try {
+                                    Thread.sleep(3000);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                rebuildAggregatedWeb3jSubscription();
+                            }
                     );
-            log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
         }
     }
 
@@ -172,10 +225,19 @@ public class LogsService {
                 })
                 .subscribe(
                         this::onNewRealtimeLog,
-                        err -> log.error("Realtime subscription error", err)
+                        (err) -> {
+                            log.error("Realtime subscription error (Fallback): {}. Attempting to re-subscribe in 3s.", err.getMessage());
+                            try {
+                                webSocketService.close();
+                                webSocketService.connect();
+                                Thread.sleep(3000);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                            rebuildAggregatedWeb3jSubscription();
+                        }
                 );
     }
-
 
     private EthFilter buildRealtimeFilter() {
         boolean subscribeAllAddresses = subscriptions.stream()
@@ -238,10 +300,20 @@ public class LogsService {
         }
 
         try {
-            BigInteger endBlock = (request.getEndBlock() != null)
-                    ? request.getEndBlock()
-                    : web3j.ethBlockNumber().send().getBlockNumber();
-            BigInteger startBlock = request.getStartBlock() != null ? request.getStartBlock() : endBlock;
+            BigInteger endBlock;
+            try {
+                endBlock = (request.getEndBlock() != null)
+                        ? request.getEndBlock()
+                        : web3jHttp.ethBlockNumber().send().getBlockNumber();
+            } catch (ClientConnectionException e) {
+                log.warn("Error fetching latest block via HTTP client, recreating and retrying once", e);
+                recreateWeb3jHttp();
+                endBlock = (request.getEndBlock() != null)
+                        ? request.getEndBlock()
+                        : web3jHttp.ethBlockNumber().send().getBlockNumber();
+            }
+
+            BigInteger startBlock = request.getStartBlock();
             log.info("Last chain block: {}, starting from: {}", endBlock, startBlock);
 
             boolean canFetchHistoricalData = startBlock != null && startBlock.compareTo(endBlock) < 0;
@@ -277,31 +349,88 @@ public class LogsService {
 
     private void pushHistoricalData(LogSubscription subscription, BigInteger startBlock, BigInteger endBlock) throws Exception {
         LogsRequest request = subscription.getClientRequest();
-        log.info("Pushing historical data for log subscription: {}, startBlock {}, endBlock {}",
+        log.debug("Pushing historical data for log subscription: {}, startBlock {}, endBlock {}",
                 subscription.getClientRequest(),
                 startBlock,
                 endBlock);
+
+        // Basic recursion case: stop if the range is invalid (start > end).
+        if (startBlock.compareTo(endBlock) > 0) {
+            return;
+        }
+
         EthFilter historicalFilter = new EthFilter(
                 DefaultBlockParameter.valueOf(startBlock),
                 DefaultBlockParameter.valueOf(endBlock),
                 Optional.ofNullable(request.getContractAddresses()).orElse(List.of())
         );
 
-        if (!Objects.isNull(request.getTopics()) && !request.getTopics().isEmpty())
+        if (!Objects.isNull(request.getTopics()) && !request.getTopics().isEmpty()) {
             historicalFilter.addOptionalTopics(request.getTopics().toArray(new String[0]));
+        }
 
-        EthLog ethLog = web3j.ethGetLogs(historicalFilter).send();
+        // waiting for infura cooldown
+        try {
+            Thread.sleep(sleepBeforeRequestMlSec);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+
+        EthLog ethLog;
+        try {
+            ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+        } catch (ClientConnectionException e) {
+            log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
+            recreateWeb3jHttp();
+            ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+        }
 
         if (ethLog.hasError() || ethLog.getLogs() == null) {
-            String errorMessage = ethLog.hasError() ? ethLog.getError().getMessage() : "Node returned a null result for logs query.";
-            log.error("Failed to get historical logs from node: {}", errorMessage);
-            throw new RuntimeException("Failed to fetch historical logs: " + errorMessage);
+            String errorMessage = ethLog.hasError()
+                    ? ethLog.getError().getMessage()
+                    : "Node returned a null result for logs query.";
+
+            if (!errorMessage.contains("query returned more than 10000 results")) {
+                log.error("Failed to get historical logs from node: {}", errorMessage);
+                throw new RuntimeException("Failed to fetch historical logs: " + errorMessage);
+            }
+
+            if (startBlock.equals(endBlock)) {
+                log.error("Failed to get logs for single block {}. Block has >10k logs. Skipping.", startBlock);
+                return;
+            }
+
+            log.warn(errorMessage);
+            BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
+            log.debug("Recursing historical logs with middle {}", middle);
+            pushHistoricalData(subscription, startBlock, middle);
+            pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
+            return;
         }
 
         List<Log> historicalLogs = ethLog.getLogs().stream()
-                .map(logResult -> (Log) logResult.get()).collect(Collectors.toList());
+                .map(logResult -> (Log) logResult.get())
+                .collect(Collectors.toList());
 
         subscription.sendHistorical(historicalLogs);
         log.info("Finished historical backfill for client. Sent {} logs.", historicalLogs.size());
+    }
+
+    private synchronized void recreateWeb3jHttp() {
+        try {
+            if (this.web3jHttp != null) {
+                try {
+                    this.web3jHttp.shutdown();
+                } catch (UnsupportedOperationException e) {
+                    log.debug("web3jHttp.shutdown() is not supported by this version, ignoring.");
+                } catch (Exception e) {
+                    log.warn("Error while shutting down old web3jHttp instance", e);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Unexpected error during old web3jHttp shutdown", e);
+        }
+        this.web3jHttp = web3jHttpFactory.get();
+        log.info("Recreated web3jHttp client via factory");
     }
 }
