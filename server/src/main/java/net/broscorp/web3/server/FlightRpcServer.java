@@ -11,10 +11,12 @@ import org.apache.arrow.flight.Location;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.http.HttpService;
 import org.web3j.protocol.websocket.WebSocketService;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 /**
  * An app allowing Ethereum JSON-rpc to Apache Arrow Flight integration
@@ -45,6 +47,7 @@ public class FlightRpcServer {
     private static void runBlocksAndLogsProducer(String[] args) {
         String flightPortString = System.getenv("FLIGHT_PORT");
         String ethereumNodeUrl = System.getenv("ETHEREUM_NODE_URL");
+        String ethereumNodeHttpUrl = System.getenv("ETHEREUM_NODE_HTTP_URL");
         String maxBlockRangeString = System.getenv("MAX_BLOCK_RANGE");
 
         if (args.length == 3) {
@@ -73,15 +76,16 @@ public class FlightRpcServer {
             System.exit(-1);
         }
 
-        Web3j web3 = Web3j.build(webSocketService);
+        Web3j web3WebSocket = Web3j.build(webSocketService);
+        Supplier<Web3j> web3jHttpFactory = () -> Web3j.build(new HttpService(ethereumNodeHttpUrl));
 
         try (ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
              BufferAllocator allocator = new RootAllocator();
              FlightServer server = FlightServer.builder()
                      .allocator(allocator)
                      .location(serverLocation)
-                     .producer(new Producer(new LogsService(web3, maxBlockRange, webSocketService),
-                             new BlocksService(web3, maxBlockRange),
+                     .producer(new Producer(new LogsService(web3WebSocket, web3jHttpFactory, maxBlockRange, webSocketService),
+                             new BlocksService(web3WebSocket, maxBlockRange),
                              new SubscriptionFactory(allocator, new Converter(), executorService)))
                      .build()) {
 
