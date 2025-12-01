@@ -452,7 +452,8 @@ class LogsServiceTest {
                 500,
                 webSocketServiceMock,
                 testExecutor,
-                0
+                0,
+                5
         );
 
         BigInteger latestBlock = BigInteger.valueOf(100);
@@ -522,7 +523,7 @@ class LogsServiceTest {
     void pushHistoricalData_whenTooManyResultsError_recursesAndSkipsWithoutSending() {
         // GIVEN
         Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
-        logsService = new LogsService(web3jMock, web3jHttpFactory, 10, null,
+        logsService = new LogsService(web3jMock, web3jHttpFactory, 10,
                 Executors.newSingleThreadExecutor(), 0);
 
         EthLog ethLogError = mock(EthLog.class);
@@ -556,7 +557,7 @@ class LogsServiceTest {
         final int[] counter = {0};
         Supplier<Web3j> factory = () -> counter[0]++ == 0 ? httpMock1 : httpMock2;
 
-        logsService = new LogsService(web3jMock, factory, 500, null,
+        logsService = new LogsService(web3jMock, factory, 500,
                 Executors.newSingleThreadExecutor(), 0);
 
         Request<?, EthLog> failingRequest = mock(Request.class);
@@ -594,7 +595,7 @@ class LogsServiceTest {
     void pushHistoricalData_whenUnknownError_throwsRuntimeException() {
         // GIVEN
         Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
-        logsService = new LogsService(web3jMock, web3jHttpFactory, 500, null,
+        logsService = new LogsService(web3jMock, web3jHttpFactory, 500,
                 Executors.newSingleThreadExecutor(), 0);
 
         EthLog ethLogError = mock(EthLog.class);
@@ -618,8 +619,6 @@ class LogsServiceTest {
                 .hasMessageContaining("Failed to fetch historical logs");
     }
 
-    // ---------- НОВЫЕ ТЕСТЫ ДЛЯ processNewSubscription И handleSubscriptionRemoval ----------
-
     @Test
     @SneakyThrows
     void processNewSubscription_clientConnectionExceptionWhenFetchingLatestBlock_recreatesHttpClientAndRetries() {
@@ -629,17 +628,15 @@ class LogsServiceTest {
         final int[] counter = {0};
         Supplier<Web3j> factory = () -> counter[0]++ == 0 ? httpMock1 : httpMock2;
 
-        logsService = new LogsService(web3jMock, factory, 500, null,
+        logsService = new LogsService(web3jMock, factory, 500,
                 Executors.newSingleThreadExecutor(), 0);
 
         when(web3jMock.ethLogFlowable(any())).thenReturn(Flowable.empty());
 
-        // первый HTTP-client: кидает ClientConnectionException при запросе блока
         Request<?, EthBlockNumber> failingReq = mock(Request.class);
         when(failingReq.send()).thenThrow(new ClientConnectionException("boom"));
         doReturn(failingReq).when(httpMock1).ethBlockNumber();
 
-        // второй HTTP-client: возвращает корректный номер блока
         BigInteger latestBlock = BigInteger.valueOf(100);
         EthBlockNumber okBlockNumber = mock(EthBlockNumber.class);
         when(okBlockNumber.getBlockNumber()).thenReturn(latestBlock);
@@ -649,11 +646,10 @@ class LogsServiceTest {
         doReturn(okReq).when(httpMock2).ethBlockNumber();
 
         LogsRequest request = new LogsRequest();
-        request.setStartBlock(latestBlock); // start == end → backfill не запускается
+        request.setStartBlock(latestBlock);
         request.setEndBlock(null);          // awaitingForRealTimeData = true
         when(subscriptionMock.getClientRequest()).thenReturn(request);
 
-        // WHEN (никакого исключения наружу быть не должно)
         invokeProcessNewSubscription(logsService, subscriptionMock);
 
         // THEN
@@ -671,7 +667,6 @@ class LogsServiceTest {
                 web3jMock,
                 factory,
                 500,
-                null,
                 Executors.newSingleThreadExecutor(),
                 0
         );
