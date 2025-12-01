@@ -27,6 +27,7 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -50,6 +51,7 @@ public class LogsService {
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
     private final int sleepBeforeRequestMlSec;
+    private final int subscriptionMinutesTimeOut;
 
     private static class LogResponse extends Response<Log> {
     }
@@ -65,7 +67,8 @@ public class LogsService {
                 maxBlockRange,
                 null,
                 Executors.newVirtualThreadPerTaskExecutor(),
-                500);
+                500,
+                3);
     }
 
     public LogsService(Web3j web3jWebSocket,
@@ -78,7 +81,8 @@ public class LogsService {
                 maxBlockRange,
                 null,
                 executor,
-                sleepBeforeRequestMlSec);
+                sleepBeforeRequestMlSec,
+                3);
     }
 
     public LogsService(Web3j web3jWebSocket,
@@ -90,7 +94,8 @@ public class LogsService {
                 maxBlockRange,
                 webSocketService,
                 Executors.newVirtualThreadPerTaskExecutor(),
-                Integer.parseInt(System.getenv("SLEEP_BEFORE_WEB3_REQUEST_ML_SEC")));
+                Integer.parseInt(System.getenv("SLEEP_BEFORE_WEB3_REQUEST_ML_SEC")),
+                3);
     }
 
     public LogsService(Web3j web3jWebSocket,
@@ -98,7 +103,8 @@ public class LogsService {
                        int maxBlockRange,
                        WebSocketService webSocketService,
                        ExecutorService executor,
-                       int sleepBeforeRequestMlSec) {
+                       int sleepBeforeRequestMlSec,
+                       int subscriptionMinutesTimeOut) {
         this.web3jWebSocket = web3jWebSocket;
         this.web3jHttpFactory = web3jHttpFactory;
         this.web3jHttp = web3jHttpFactory.get();
@@ -106,6 +112,7 @@ public class LogsService {
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
         this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
+        this.subscriptionMinutesTimeOut = subscriptionMinutesTimeOut;
     }
 
     /**
@@ -223,18 +230,30 @@ public class LogsService {
                             logObj.getBlockNumber(), logObj.getTransactionHash(), logObj.getTopics());
                     return logObj;
                 })
+                .timeout(subscriptionMinutesTimeOut, TimeUnit.MINUTES)
                 .subscribe(
                         this::onNewRealtimeLog,
-                        (err) -> {
-                            log.error("Realtime subscription error (Fallback): {}. Attempting to re-subscribe in 3s.", err.getMessage());
+                        err -> {
+                            log.error("Realtime subscription error / timeout: ", err);
                             try {
-                                webSocketService.close();
-                                webSocketService.connect();
-                                Thread.sleep(3000);
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
+                                try {
+                                    webSocketService.close();
+                                } catch (Exception e) {
+                                    log.warn("Error closing websocket: ", e);
+                                }
+                                try {
+                                    webSocketService.connect();
+                                } catch (Exception e) {
+                                    log.error("Error reconnecting websocket: ", e);
+                                }
+                            } finally {
+                                try {
+                                    Thread.sleep(3000);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                rebuildAggregatedWeb3jSubscription();
                             }
-                            rebuildAggregatedWeb3jSubscription();
                         }
                 );
     }
