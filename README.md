@@ -84,6 +84,53 @@ private static final Schema LOG_SCHEMA = new Schema(List.of(
 - Java 21
 - Access to an Ethereum node (for the server). Infura was used for development.
 
+## Quick Start with Docker
+
+The easiest way to try the project is using Docker Compose with a local Hardhat node:
+
+```bash
+# Start Hardhat node and Flight server
+docker-compose up -d
+
+# Generate test data (optional - creates 50 transactions with logs)
+docker-compose --profile test-data up test-data-generator
+
+# View server logs
+docker-compose logs -f flight-server
+
+# Stop all services
+docker-compose down
+```
+
+The Flight server will be available at `localhost:8815`, and Hardhat node at `localhost:8545`.
+
+### Python Data Analysis with Jupyter
+
+Launch Jupyter notebook for interactive data analysis:
+
+```bash
+# Start Jupyter along with other services
+docker-compose --profile jupyter up -d
+
+# View Jupyter logs to confirm startup
+docker-compose logs jupyter
+
+# Access Jupyter at: http://localhost:8888
+# Token: ethereum
+```
+
+Open the notebook `ethereum_data_analysis.ipynb` to explore:
+- Querying blockchain data via Arrow Flight
+- Zero-copy conversion to Pandas
+- Visualizing logs and blocks
+- Analyzing gas usage, events, and transactions
+- Filtering by contract address
+
+**Note:** Generate test data first for meaningful analysis:
+```bash
+docker-compose --profile test-data up test-data-generator
+```
+
 ## Building the Project
 
 To build the project, run:
@@ -162,7 +209,16 @@ java --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED -ja
 ## Notes
 
 - The server requires a valid Ethereum node URL to function properly
+- For production use with Infura/Alchemy, set `ETHEREUM_NODE_URL` and `ETHEREUM_NODE_HTTP_URL` environment variables
+- The Jupyter notebook provides a complete Python example for data analysis
 
-## More client examples
+## Python Client Example
 
-Stay tuned for Python and Datafusion examples :)
+See `notebooks/ethereum_data_analysis.ipynb` for a comprehensive example including:
+- Connecting to Flight RPC server with `pyarrow`
+- Querying logs and blocks
+- Converting to Pandas DataFrames
+- Data visualization with matplotlib/seaborn
+- Filtering by contract address and topics
+
+More examples (Polars, DataFusion, R) coming soon!

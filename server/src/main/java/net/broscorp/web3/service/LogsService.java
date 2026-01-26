@@ -335,7 +335,7 @@ public class LogsService {
             BigInteger startBlock = request.getStartBlock();
             log.info("Last chain block: {}, starting from: {}", endBlock, startBlock);
 
-            boolean canFetchHistoricalData = startBlock != null && startBlock.compareTo(endBlock) < 0;
+            boolean canFetchHistoricalData = startBlock != null && startBlock.compareTo(endBlock) <= 0;
 
             if (canFetchHistoricalData) {
                 log.info("Fetching historical block range: {} - {}", startBlock, endBlock);

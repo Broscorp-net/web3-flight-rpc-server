@@ -1,0 +1,77 @@
+services:
+  hardhat:
+    image: ethereumoptimism/hardhat-node:latest
+    container_name: web3-flight-hardhat
+    ports:
+      - "8545:8545"
+    networks:
+      - web3-flight
+    command: npx hardhat node --hostname 0.0.0.0 --port 8545
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget --spider -q http://127.0.0.1:8545 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 15s
+
+  flight-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: web3-flight-server
+    ports:
+      - "8815:8815"
+    environment:
+      - ETHEREUM_NODE_URL=ws://hardhat:8545
+      - ETHEREUM_NODE_HTTP_URL=http://hardhat:8545
+      - FLIGHT_PORT=8815
+      - MAX_BLOCK_RANGE=500
+      - SLEEP_BEFORE_WEB3_REQUEST_ML_SEC=100
+    networks:
+      - web3-flight
+    depends_on:
+      hardhat:
+        condition: service_healthy
+    restart: unless-stopped
+
+  test-data-generator:
+    image: node:20-alpine
+    container_name: web3-flight-test-generator
+    working_dir: /app
+    volumes:
+      - ./test-data:/app
+    command: sh -c "npm install && node generate-test-data.js"
+    environment:
+      - ETH_NODE_URL=http://hardhat:8545
+    networks:
+      - web3-flight
+    depends_on:
+      hardhat:
+        condition: service_healthy
+
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    container_name: web3-flight-jupyter
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=ethereum
+      - GRPC_DNS_RESOLVER=native
+    networks:
+      web3-flight:
+        aliases:
+          - jupyter-client
+    depends_on:
+      flight-server:
+        condition: service_started
+      hardhat:
+        condition: service_healthy
+    command: start-notebook.sh --NotebookApp.token='ethereum' --NotebookApp.password=''
+
+
+networks:
+  web3-flight:
+    driver: bridge

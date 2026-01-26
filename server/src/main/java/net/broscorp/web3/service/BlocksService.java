@@ -105,7 +105,7 @@ public class BlocksService {
                     : web3j.ethBlockNumber().send().getBlockNumber();
             BigInteger startBlock = request.getStartBlock() != null ? request.getStartBlock() : endBlock;
 
-            boolean needsHistoricalData = startBlock != null && startBlock.compareTo(endBlock) < 0;
+            boolean needsHistoricalData = startBlock != null && startBlock.compareTo(endBlock) <= 0;
 
             if (needsHistoricalData) {
                 BigInteger firstBatchBlock = startBlock;

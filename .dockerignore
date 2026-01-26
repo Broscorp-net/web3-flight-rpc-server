@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+.idea/
+*.md
+LICENSE
+.dockerignore
+Dockerfile
+docker-compose.yml
+test-data/node_modules/

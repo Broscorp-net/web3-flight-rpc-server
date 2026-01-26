@@ -15,6 +15,7 @@ import org.apache.arrow.flight.FlightInfo;
 import org.apache.arrow.flight.NoOpFlightProducer;
 import org.apache.arrow.flight.Ticket;
 
+import java.math.BigInteger;
 import java.util.List;
 
 /**
@@ -46,8 +47,8 @@ public class Producer extends NoOpFlightProducer {
             JsonNode endNode = node.get("endBlock");
 
             request.setDataset(node.get("dataset").asText());
-            request.setStartBlock(startNode != null && !startNode.isNull() ? startNode.bigIntegerValue() : null);
-            request.setEndBlock(endNode != null && !endNode.isNull() ? endNode.bigIntegerValue() : null);
+            request.setStartBlock(startNode != null && !startNode.isNull() ? parseBigInteger(startNode) : null);
+            request.setEndBlock(endNode != null && !endNode.isNull() ? parseBigInteger(endNode) : null);
             log.info("Parsed request: {}", request);
 
             switch (request) {
@@ -65,5 +66,15 @@ public class Producer extends NoOpFlightProducer {
     @Override
     public FlightInfo getFlightInfo(CallContext context, FlightDescriptor descriptor) {
         return new FlightInfo(null, descriptor, List.of(new FlightEndpoint(new Ticket(descriptor.getCommand()))), -1, -1);
+    }
+
+    /**
+     * Parse BigInteger from JsonNode, handling both numeric and string values.
+     */
+    private static BigInteger parseBigInteger(JsonNode node) {
+        if (node.isTextual()) {
+            return new BigInteger(node.asText());
+        }
+        return node.bigIntegerValue();
     }
 }
