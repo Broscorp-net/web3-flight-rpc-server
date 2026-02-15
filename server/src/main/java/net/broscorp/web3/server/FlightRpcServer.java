@@ -46,8 +46,8 @@ public class FlightRpcServer {
 
     private static void runBlocksAndLogsProducer(String[] args) {
         String flightPortString = System.getenv("FLIGHT_PORT");
-        String ethereumNodeUrl = System.getenv("ETHEREUM_NODE_URL");
-        String ethereumNodeHttpUrl = System.getenv("ETHEREUM_NODE_HTTP_URL");
+        String ethereumNodeUrl = System.getenv("WEBSOCKET_NODE_URL");
+        String ethereumNodeHttpUrl = System.getenv("HTTP_NODE_URL");
         String maxBlockRangeString = System.getenv("MAX_BLOCK_RANGE");
 
         if (args.length == 3) {
