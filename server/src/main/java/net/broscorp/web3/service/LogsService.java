@@ -409,7 +409,8 @@ public class LogsService {
                     ? ethLog.getError().getMessage()
                     : "Node returned a null result for logs query.";
 
-            if (!errorMessage.contains("query returned more than 10000 results")) {
+            if (!errorMessage.contains("query returned more than 10000 results")
+                    && !errorMessage.toLowerCase().contains("response is too big")) {
                 log.error("Failed to get historical logs from node: {}", errorMessage);
                 throw new RuntimeException("Failed to fetch historical logs: " + errorMessage);
             }
