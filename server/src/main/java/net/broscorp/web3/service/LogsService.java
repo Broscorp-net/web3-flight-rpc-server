@@ -50,14 +50,24 @@ public class LogsService {
     private final WebSocketService webSocketService;
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
+    private Disposable newHeadsHeartbeat;
     private Map<String, Object> currentWssFilterParams;
     private final int sleepBeforeRequestMlSec;
     private final int subscriptionMinutesTimeOut;
+    private final int heartbeatTimeoutSeconds;
+
+    private static final int DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 60;
 
     private static class LogResponse extends Response<Log> {
     }
 
     private static class LogNotification extends Notification<Log> {
+    }
+
+    private static class NewHeadResponse extends Response<Object> {
+    }
+
+    private static class NewHeadNotification extends Notification<Object> {
     }
 
     public LogsService(Web3j web3jWebSocket,
@@ -106,6 +116,19 @@ public class LogsService {
                        ExecutorService executor,
                        int sleepBeforeRequestMlSec,
                        int subscriptionMinutesTimeOut) {
+        this(web3jWebSocket, web3jHttpFactory, maxBlockRange, webSocketService,
+                executor, sleepBeforeRequestMlSec, subscriptionMinutesTimeOut,
+                DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
+    }
+
+    public LogsService(Web3j web3jWebSocket,
+                       Supplier<Web3j> web3jHttpFactory,
+                       int maxBlockRange,
+                       WebSocketService webSocketService,
+                       ExecutorService executor,
+                       int sleepBeforeRequestMlSec,
+                       int subscriptionMinutesTimeOut,
+                       int heartbeatTimeoutSeconds) {
         this.web3jWebSocket = web3jWebSocket;
         this.web3jHttpFactory = web3jHttpFactory;
         this.web3jHttp = web3jHttpFactory.get();
@@ -114,6 +137,7 @@ public class LogsService {
         this.workerExecutor = executor;
         this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
         this.subscriptionMinutesTimeOut = subscriptionMinutesTimeOut;
+        this.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds;
     }
 
     /**
@@ -143,6 +167,7 @@ public class LogsService {
 
     private synchronized void rebuildAggregatedWeb3jSubscription() {
         if (subscriptions.isEmpty()) {
+            stopWssHeartbeat();
             if (aggregatedSubscription != null) {
                 aggregatedSubscription.dispose();
                 aggregatedSubscription = null;
@@ -171,6 +196,7 @@ public class LogsService {
 
             aggregatedSubscription = subscribeViaWebSocket(newFilterParams);
             currentWssFilterParams = newFilterParams;
+            startWssHeartbeat();
             log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
         } else {
             if (aggregatedSubscription != null) {
@@ -192,6 +218,75 @@ public class LogsService {
                                 rebuildAggregatedWeb3jSubscription();
                             }
                     );
+        }
+    }
+
+    /**
+     * Subscribes to {@code newHeads} on the WSS connection as a heartbeat.
+     * On mainnet, a new block arrives every ~12 seconds. If no block arrives
+     * within {@code heartbeatTimeoutSeconds}, the connection is considered dead
+     * and a reconnect is triggered.
+     */
+    private void startWssHeartbeat() {
+        stopWssHeartbeat();
+
+        Request<?, NewHeadResponse> request = new Request<>(
+                "eth_subscribe",
+                List.of("newHeads"),
+                webSocketService,
+                NewHeadResponse.class
+        );
+
+        log.info("Starting newHeads heartbeat (timeout={}s)", heartbeatTimeoutSeconds);
+
+        newHeadsHeartbeat = webSocketService.subscribe(
+                        request,
+                        "eth_unsubscribe",
+                        NewHeadNotification.class
+                )
+                .timeout(heartbeatTimeoutSeconds, TimeUnit.SECONDS)
+                .subscribe(
+                        notification -> log.debug("Heartbeat: new block received"),
+                        err -> {
+                            log.error("WSS heartbeat failed (no newHeads for {}s). Reconnecting.", heartbeatTimeoutSeconds, err);
+                            currentWssFilterParams = null;
+                            reconnectWebSocket();
+                        }
+                );
+    }
+
+    private void stopWssHeartbeat() {
+        if (newHeadsHeartbeat != null && !newHeadsHeartbeat.isDisposed()) {
+            newHeadsHeartbeat.dispose();
+            newHeadsHeartbeat = null;
+            log.info("Stopped newHeads heartbeat.");
+        }
+    }
+
+    /**
+     * Closes the WebSocket connection, reconnects, and rebuilds all subscriptions.
+     * Called by the heartbeat when no newHeads arrive within the timeout,
+     * or by the logs subscription error handler on unexpected errors.
+     */
+    private void reconnectWebSocket() {
+        try {
+            try {
+                webSocketService.close();
+            } catch (Exception e) {
+                log.warn("Error closing websocket: ", e);
+            }
+            try {
+                webSocketService.connect();
+            } catch (Exception e) {
+                log.error("Error reconnecting websocket: ", e);
+            }
+        } finally {
+            try {
+                Thread.sleep(3000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            rebuildAggregatedWeb3jSubscription();
         }
     }
 
@@ -260,31 +355,12 @@ public class LogsService {
                             logObj.getBlockNumber(), logObj.getTransactionHash(), logObj.getTopics());
                     return logObj;
                 })
-                .timeout(subscriptionMinutesTimeOut, TimeUnit.MINUTES)
                 .subscribe(
                         this::onNewRealtimeLog,
                         err -> {
-                            log.error("Realtime subscription error / timeout: ", err);
+                            log.error("Realtime logs subscription error: ", err);
                             currentWssFilterParams = null;
-                            try {
-                                try {
-                                    webSocketService.close();
-                                } catch (Exception e) {
-                                    log.warn("Error closing websocket: ", e);
-                                }
-                                try {
-                                    webSocketService.connect();
-                                } catch (Exception e) {
-                                    log.error("Error reconnecting websocket: ", e);
-                                }
-                            } finally {
-                                try {
-                                    Thread.sleep(3000);
-                                } catch (InterruptedException e) {
-                                    Thread.currentThread().interrupt();
-                                }
-                                rebuildAggregatedWeb3jSubscription();
-                            }
+                            reconnectWebSocket();
                         }
                 );
     }
