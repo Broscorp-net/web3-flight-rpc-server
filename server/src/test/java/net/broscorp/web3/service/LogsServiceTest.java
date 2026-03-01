@@ -495,9 +495,16 @@ class LogsServiceTest {
 
         // THEN
         List<Request> allWsRequests = wsRequestCaptor.getAllValues();
-        assertThat(allWsRequests).hasSize(2);
+        // 4 subscribe calls: logs + newHeads heartbeat for each of the 2 rebuilds
+        assertThat(allWsRequests).hasSize(4);
 
-        Request<?, ?> wsRequest = allWsRequests.getLast();
+        // Filter to only "logs" subscribe requests (skip "newHeads" heartbeat requests)
+        List<Request> logsRequests = allWsRequests.stream()
+                .filter(r -> r.getParams().size() == 2 && "logs".equals(r.getParams().get(0)))
+                .toList();
+        assertThat(logsRequests).hasSize(2);
+
+        Request<?, ?> wsRequest = logsRequests.getLast();
         assertThat(wsRequest.getMethod()).isEqualTo("eth_subscribe");
 
         List<?> params = wsRequest.getParams();

@@ -163,7 +163,8 @@ java --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED -ja
 ```
 
 With environment variables:
-- `ETHEREUM_NODE_URL` - URL of the Ethereum node (required)
+- `HTTP_NODE_URL` - URL of the Ethereum node (required)
+- `WEBSOCKET_NODE_URL` - URL of the Ethereum node websocket (required)
 - `FLIGHT_PORT` - Port for the Flight server (default: 8815)
 
 **Using command line arguments:**
@@ -209,7 +210,7 @@ java --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED -ja
 ## Notes
 
 - The server requires a valid Ethereum node URL to function properly
-- For production use with Infura/Alchemy, set `ETHEREUM_NODE_URL` and `ETHEREUM_NODE_HTTP_URL` environment variables
+- For production use with Infura/Alchemy, set `WEBSOCKET_NODE_URL` and `HTTP_NODE_URL` environment variables
 - The Jupyter notebook provides a complete Python example for data analysis
 
 ## Python Client Example
