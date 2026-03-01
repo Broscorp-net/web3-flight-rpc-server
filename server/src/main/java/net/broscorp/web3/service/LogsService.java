@@ -42,13 +42,14 @@ import java.util.stream.Collectors;
 @Slf4j
 public class LogsService {
 
-    private final Web3j web3jWebSocket;
+    private volatile Web3j web3jWebSocket;
     private volatile Web3j web3jHttp;
     private final Supplier<Web3j> web3jHttpFactory;
 
     private final ExecutorService workerExecutor;
     private final List<LogSubscription> subscriptions = new CopyOnWriteArrayList<>();
-    private final WebSocketService webSocketService;
+    private volatile WebSocketService webSocketService;
+    private final Supplier<WebSocketService> webSocketServiceFactory;
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
     private Disposable newHeadsHeartbeat;
@@ -76,13 +77,8 @@ public class LogsService {
     public LogsService(Web3j web3jWebSocket,
                        Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange) {
-        this(web3jWebSocket,
-                web3jHttpFactory,
-                maxBlockRange,
-                null,
-                Executors.newVirtualThreadPerTaskExecutor(),
-                500,
-                3);
+        this(web3jWebSocket, web3jHttpFactory, maxBlockRange,
+                Executors.newVirtualThreadPerTaskExecutor(), 500, 3);
     }
 
     public LogsService(Web3j web3jWebSocket,
@@ -90,57 +86,74 @@ public class LogsService {
                        int maxBlockRange,
                        ExecutorService executor,
                        int sleepBeforeRequestMlSec) {
-        this(web3jWebSocket,
-                web3jHttpFactory,
-                maxBlockRange,
-                null,
-                executor,
-                sleepBeforeRequestMlSec,
-                3);
+        this(web3jWebSocket, web3jHttpFactory, maxBlockRange,
+                executor, sleepBeforeRequestMlSec, 3);
     }
 
-    public LogsService(Web3j web3jWebSocket,
-                       Supplier<Web3j> web3jHttpFactory,
+    private LogsService(Web3j web3jWebSocket,
+                        Supplier<Web3j> web3jHttpFactory,
+                        int maxBlockRange,
+                        ExecutorService executor,
+                        int sleepBeforeRequestMlSec,
+                        int subscriptionMinutesTimeOut) {
+        this.web3jWebSocket = web3jWebSocket;
+        this.web3jHttpFactory = web3jHttpFactory;
+        this.web3jHttp = web3jHttpFactory.get();
+        this.webSocketService = null;
+        this.webSocketServiceFactory = null;
+        this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
+        this.workerExecutor = executor;
+        this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
+        this.subscriptionMinutesTimeOut = subscriptionMinutesTimeOut;
+        this.heartbeatTimeoutSeconds = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS;
+    }
+
+    public LogsService(Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange,
-                       WebSocketService webSocketService) {
-        this(web3jWebSocket,
-                web3jHttpFactory,
+                       Supplier<WebSocketService> webSocketServiceFactory) {
+        this(web3jHttpFactory,
                 maxBlockRange,
-                webSocketService,
+                webSocketServiceFactory,
                 Executors.newVirtualThreadPerTaskExecutor(),
                 Integer.parseInt(System.getenv("SLEEP_BEFORE_WEB3_REQUEST_ML_SEC")),
                 3);
     }
 
-    public LogsService(Web3j web3jWebSocket,
-                       Supplier<Web3j> web3jHttpFactory,
+    public LogsService(Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange,
-                       WebSocketService webSocketService,
+                       Supplier<WebSocketService> webSocketServiceFactory,
                        ExecutorService executor,
                        int sleepBeforeRequestMlSec,
                        int subscriptionMinutesTimeOut) {
-        this(web3jWebSocket, web3jHttpFactory, maxBlockRange, webSocketService,
-                executor, sleepBeforeRequestMlSec, subscriptionMinutesTimeOut,
-                DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
+        this(web3jHttpFactory, maxBlockRange, webSocketServiceFactory,
+                executor, sleepBeforeRequestMlSec,
+                subscriptionMinutesTimeOut, DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
     }
 
-    public LogsService(Web3j web3jWebSocket,
-                       Supplier<Web3j> web3jHttpFactory,
+    public LogsService(Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange,
-                       WebSocketService webSocketService,
+                       Supplier<WebSocketService> webSocketServiceFactory,
                        ExecutorService executor,
                        int sleepBeforeRequestMlSec,
                        int subscriptionMinutesTimeOut,
                        int heartbeatTimeoutSeconds) {
-        this.web3jWebSocket = web3jWebSocket;
         this.web3jHttpFactory = web3jHttpFactory;
         this.web3jHttp = web3jHttpFactory.get();
-        this.webSocketService = webSocketService;
+        this.webSocketServiceFactory = webSocketServiceFactory;
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
         this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
         this.subscriptionMinutesTimeOut = subscriptionMinutesTimeOut;
         this.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds;
+
+        try {
+            WebSocketService wss = webSocketServiceFactory.get();
+            wss.connect();
+            this.webSocketService = wss;
+            this.web3jWebSocket = Web3j.build(wss);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create initial WebSocket connection", e);
+        }
     }
 
     /**
@@ -294,8 +307,13 @@ public class LogsService {
             int delaySec = 3;
             while (!Thread.currentThread().isInterrupted()) {
                 try {
-                    webSocketService.connect();
-                    log.info("WebSocket reconnected successfully.");
+                    // Create a fresh WebSocketService instance because close() terminates
+                    // the internal ScheduledThreadPoolExecutor which cannot be restarted.
+                    WebSocketService newWss = webSocketServiceFactory.get();
+                    newWss.connect();
+                    this.webSocketService = newWss;
+                    this.web3jWebSocket = Web3j.build(newWss);
+                    log.info("WebSocket reconnected successfully with new service instance.");
                     break;
                 } catch (Exception e) {
                     log.error("WebSocket reconnect failed, retrying in {}s.", delaySec, e);

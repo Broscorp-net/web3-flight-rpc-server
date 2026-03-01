@@ -68,15 +68,18 @@ public class FlightRpcServer {
 
         Location serverLocation = Location.forGrpcInsecure("0.0.0.0", flightPort);
 
-        WebSocketService webSocketService = new WebSocketService(ethereumNodeUrl, true);
+        String wsUrl = ethereumNodeUrl;
+        Supplier<WebSocketService> webSocketServiceFactory = () -> new WebSocketService(wsUrl, true);
+
+        WebSocketService blocksWss = webSocketServiceFactory.get();
         try {
-            webSocketService.connect();
+            blocksWss.connect();
         } catch (Exception e) {
             log.error("Failed to connect to Ethereum WebSocket node: {}", e.getMessage(), e);
             System.exit(-1);
         }
+        Web3j web3WebSocket = Web3j.build(blocksWss);
 
-        Web3j web3WebSocket = Web3j.build(webSocketService);
         Supplier<Web3j> web3jHttpFactory = () -> Web3j.build(new HttpService(ethereumNodeHttpUrl));
 
         try (ExecutorService executorService = Executors.newVirtualThreadPerTaskExecutor();
@@ -84,7 +87,7 @@ public class FlightRpcServer {
              FlightServer server = FlightServer.builder()
                      .allocator(allocator)
                      .location(serverLocation)
-                     .producer(new Producer(new LogsService(web3WebSocket, web3jHttpFactory, maxBlockRange, webSocketService),
+                     .producer(new Producer(new LogsService(web3jHttpFactory, maxBlockRange, webSocketServiceFactory),
                              new BlocksService(web3WebSocket, maxBlockRange),
                              new SubscriptionFactory(allocator, new Converter(), executorService)))
                      .build()) {
@@ -105,7 +108,7 @@ public class FlightRpcServer {
         } catch (Exception e) {
             throw new RuntimeException("Failed to start Flight server", e);
         } finally {
-            webSocketService.close();
+            blocksWss.close();
         }
     }
 }

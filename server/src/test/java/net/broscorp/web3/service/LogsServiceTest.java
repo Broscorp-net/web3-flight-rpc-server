@@ -447,10 +447,9 @@ class LogsServiceTest {
         Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
 
         logsService = new LogsService(
-                web3jMock,
                 web3jHttpFactory,
                 500,
-                webSocketServiceMock,
+                () -> webSocketServiceMock,
                 testExecutor,
                 0,
                 5
@@ -651,6 +650,12 @@ class LogsServiceTest {
         Request<?, EthBlockNumber> okReq = mock(Request.class);
         when(okReq.send()).thenReturn(okBlockNumber);
         doReturn(okReq).when(httpMock2).ethBlockNumber();
+
+        EthLog ethLogMock = mock(EthLog.class);
+        when(ethLogMock.getLogs()).thenReturn(List.of());
+        Request<?, EthLog> getLogsRequestMock = mock(Request.class);
+        when(getLogsRequestMock.send()).thenReturn(ethLogMock);
+        doReturn(getLogsRequestMock).when(httpMock2).ethGetLogs(any());
 
         LogsRequest request = new LogsRequest();
         request.setStartBlock(latestBlock);
