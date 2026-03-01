@@ -194,10 +194,16 @@ public class LogsService {
                 log.info("Disposed previous aggregated subscription.");
             }
 
-            aggregatedSubscription = subscribeViaWebSocket(newFilterParams);
-            currentWssFilterParams = newFilterParams;
-            startWssHeartbeat();
-            log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
+            try {
+                aggregatedSubscription = subscribeViaWebSocket(newFilterParams);
+                currentWssFilterParams = newFilterParams;
+                startWssHeartbeat();
+                log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
+            } catch (Exception e) {
+                log.error("Failed to create WebSocket subscription, scheduling reconnect.", e);
+                currentWssFilterParams = null;
+                workerExecutor.submit(this::reconnectWebSocket);
+            }
         } else {
             if (aggregatedSubscription != null) {
                 aggregatedSubscription.dispose();
