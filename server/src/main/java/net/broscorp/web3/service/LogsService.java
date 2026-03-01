@@ -50,6 +50,7 @@ public class LogsService {
     private final WebSocketService webSocketService;
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
+    private Map<String, Object> currentWssFilterParams;
     private final int sleepBeforeRequestMlSec;
     private final int subscriptionMinutesTimeOut;
 
@@ -141,21 +142,41 @@ public class LogsService {
     }
 
     private synchronized void rebuildAggregatedWeb3jSubscription() {
-        if (aggregatedSubscription != null) {
-            aggregatedSubscription.dispose();
-            aggregatedSubscription = null;
-            log.info("No active subscriptions. Aggregated subscription not created.");
-        }
-
         if (subscriptions.isEmpty()) {
+            if (aggregatedSubscription != null) {
+                aggregatedSubscription.dispose();
+                aggregatedSubscription = null;
+                currentWssFilterParams = null;
+                log.info("No active subscriptions. Aggregated subscription disposed.");
+            }
             return;
         }
 
         if (webSocketService != null) {
-            // Prefer true WebSocket subscriptions to avoid HTTP polling filters.
-            aggregatedSubscription = subscribeViaWebSocket();
+            Map<String, Object> newFilterParams = buildWssFilterParams();
+
+            // Skip rebuild if WSS is alive and filter hasn't changed
+            if (aggregatedSubscription != null
+                    && !aggregatedSubscription.isDisposed()
+                    && newFilterParams.equals(currentWssFilterParams)) {
+                log.info("WSS filter unchanged, skipping rebuild. {} subscriptions active.",
+                        subscriptions.size());
+                return;
+            }
+
+            if (aggregatedSubscription != null) {
+                aggregatedSubscription.dispose();
+                log.info("Disposed previous aggregated subscription.");
+            }
+
+            aggregatedSubscription = subscribeViaWebSocket(newFilterParams);
+            currentWssFilterParams = newFilterParams;
             log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
         } else {
+            if (aggregatedSubscription != null) {
+                aggregatedSubscription.dispose();
+            }
+
             // Fallback: Build filter and use ethLogFlowable (may use HTTP-style filters).
             EthFilter aggregatedFilter = buildRealtimeFilter();
             aggregatedSubscription = web3jWebSocket.ethLogFlowable(aggregatedFilter)
@@ -174,7 +195,7 @@ public class LogsService {
         }
     }
 
-    private Disposable subscribeViaWebSocket() {
+    private Map<String, Object> buildWssFilterParams() {
         boolean subscribeAllAddresses = subscriptions.stream()
                 .map(Subscription::getClientRequest)
                 .anyMatch(req -> req.getContractAddresses() == null || req.getContractAddresses().isEmpty());
@@ -188,6 +209,7 @@ public class LogsService {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .distinct()
+                .sorted()
                 .toList();
 
         List<String> allTopics = subscriptions.stream()
@@ -195,6 +217,7 @@ public class LogsService {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .distinct()
+                .sorted()
                 .toList();
 
         Map<String, Object> filterParams = new LinkedHashMap<>();
@@ -203,12 +226,14 @@ public class LogsService {
             filterParams.put("address", allAddresses);
         }
 
-        // Topics: Ethereum allows up to 4 positions.
-        // Put all event signatures into position 0.
         if (!subscribeAllTopics && !allTopics.isEmpty()) {
             filterParams.put("topics", List.of(allTopics));
         }
 
+        return filterParams;
+    }
+
+    private Disposable subscribeViaWebSocket(Map<String, Object> filterParams) {
         Request<?, LogResponse> request = new Request<>(
                 "eth_subscribe",
                 List.of("logs", filterParams),
@@ -216,8 +241,13 @@ public class LogsService {
                 LogResponse.class
         );
 
+        int addressCount = filterParams.containsKey("address")
+                ? ((List<?>) filterParams.get("address")).size() : 0;
+        int topicCount = filterParams.containsKey("topics")
+                ? ((List<?>) ((List<?>) filterParams.get("topics")).getFirst()).size() : 0;
+
         log.info("Created WebSocket subscription: {} addresses, {} topics (all in slot 0).",
-                allAddresses.size(), allTopics.size());
+                addressCount, topicCount);
 
         return webSocketService.subscribe(
                         request,
@@ -235,6 +265,7 @@ public class LogsService {
                         this::onNewRealtimeLog,
                         err -> {
                             log.error("Realtime subscription error / timeout: ", err);
+                            currentWssFilterParams = null;
                             try {
                                 try {
                                     webSocketService.close();
