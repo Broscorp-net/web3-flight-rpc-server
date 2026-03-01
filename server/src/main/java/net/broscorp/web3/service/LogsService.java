@@ -28,6 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -52,11 +53,13 @@ public class LogsService {
     private Disposable aggregatedSubscription;
     private Disposable newHeadsHeartbeat;
     private Map<String, Object> currentWssFilterParams;
+    private final AtomicBoolean reconnecting = new AtomicBoolean(false);
     private final int sleepBeforeRequestMlSec;
     private final int subscriptionMinutesTimeOut;
     private final int heartbeatTimeoutSeconds;
 
     private static final int DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 60;
+    private static final int MAX_RECONNECT_DELAY_SEC = 60;
 
     private static class LogResponse extends Response<Log> {
     }
@@ -270,29 +273,45 @@ public class LogsService {
     }
 
     /**
-     * Closes the WebSocket connection, reconnects, and rebuilds all subscriptions.
-     * Called by the heartbeat when no newHeads arrive within the timeout,
-     * or by the logs subscription error handler on unexpected errors.
+     * Closes the WebSocket connection, reconnects with exponential backoff,
+     * and rebuilds all subscriptions once connected.
+     * <p>
+     * Uses an {@link AtomicBoolean} guard to prevent concurrent reconnect attempts
+     * (e.g. heartbeat timeout and logs error firing simultaneously).
      */
     private void reconnectWebSocket() {
+        if (!reconnecting.compareAndSet(false, true)) {
+            log.info("WebSocket reconnect already in progress, skipping.");
+            return;
+        }
         try {
             try {
                 webSocketService.close();
             } catch (Exception e) {
                 log.warn("Error closing websocket: ", e);
             }
-            try {
-                webSocketService.connect();
-            } catch (Exception e) {
-                log.error("Error reconnecting websocket: ", e);
+
+            int delaySec = 3;
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    webSocketService.connect();
+                    log.info("WebSocket reconnected successfully.");
+                    break;
+                } catch (Exception e) {
+                    log.error("WebSocket reconnect failed, retrying in {}s.", delaySec, e);
+                    try {
+                        Thread.sleep(delaySec * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    delaySec = Math.min(delaySec * 2, MAX_RECONNECT_DELAY_SEC);
+                }
             }
-        } finally {
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+
             rebuildAggregatedWeb3jSubscription();
+        } finally {
+            reconnecting.set(false);
         }
     }
 
