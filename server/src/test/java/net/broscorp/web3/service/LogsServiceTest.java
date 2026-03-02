@@ -757,6 +757,81 @@ class LogsServiceTest {
     }
 
 
+    @Test
+    @SneakyThrows
+    void pushHistoricalData_whenOomDuringDeserialization_bisectsBlockRange() {
+        // GIVEN
+        Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
+        logsService = new LogsService(web3jMock, web3jHttpFactory, 10,
+                Executors.newSingleThreadExecutor(), 0);
+
+        // First call throws JsonMappingException wrapping OOM (simulating huge response),
+        // subsequent calls on smaller ranges succeed with empty logs.
+        com.fasterxml.jackson.databind.JsonMappingException oomException =
+                com.fasterxml.jackson.databind.JsonMappingException.from(
+                        (com.fasterxml.jackson.core.JsonParser) null,
+                        "Java heap space",
+                        new OutOfMemoryError("Java heap space")
+                );
+
+        EthLog okEthLog = mock(EthLog.class);
+        when(okEthLog.getLogs()).thenReturn(List.of());
+
+        Request<?, EthLog> failingRequest = mock(Request.class);
+        when(failingRequest.send()).thenThrow(oomException);
+
+        Request<?, EthLog> okRequest = mock(Request.class);
+        when(okRequest.send()).thenReturn(okEthLog);
+
+        // First call fails, rest succeed
+        doReturn(failingRequest)
+                .doReturn(okRequest)
+                .doReturn(okRequest)
+                .when(web3jHttpMock).ethGetLogs(any());
+
+        LogsRequest request = new LogsRequest();
+        when(subscriptionMock.getClientRequest()).thenReturn(request);
+
+        // WHEN
+        invokePushHistoricalData(logsService, subscriptionMock,
+                BigInteger.ONE, BigInteger.valueOf(3));
+
+        // THEN: should have bisected - first call fails, then two smaller ranges succeed
+        verify(web3jHttpMock, atLeastOnce()).ethGetLogs(any());
+        verify(subscriptionMock, never()).error(any());
+    }
+
+    @Test
+    @SneakyThrows
+    void pushHistoricalData_whenOomOnSingleBlock_skipsWithoutThrowing() {
+        // GIVEN
+        Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
+        logsService = new LogsService(web3jMock, web3jHttpFactory, 10,
+                Executors.newSingleThreadExecutor(), 0);
+
+        com.fasterxml.jackson.databind.JsonMappingException oomException =
+                com.fasterxml.jackson.databind.JsonMappingException.from(
+                        (com.fasterxml.jackson.core.JsonParser) null,
+                        "Java heap space",
+                        new OutOfMemoryError("Java heap space")
+                );
+
+        Request<?, EthLog> failingRequest = mock(Request.class);
+        when(failingRequest.send()).thenThrow(oomException);
+        doReturn(failingRequest).when(web3jHttpMock).ethGetLogs(any());
+
+        LogsRequest request = new LogsRequest();
+        when(subscriptionMock.getClientRequest()).thenReturn(request);
+
+        // WHEN: single block range, should skip gracefully
+        invokePushHistoricalData(logsService, subscriptionMock,
+                BigInteger.ONE, BigInteger.ONE);
+
+        // THEN: no data sent, no error thrown
+        verify(subscriptionMock, never()).sendHistorical(any());
+        verify(subscriptionMock, never()).error(any());
+    }
+
     // ---------- reflection helpers ----------
 
     private static void invokePushHistoricalData(

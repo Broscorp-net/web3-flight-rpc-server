@@ -552,6 +552,19 @@ public class LogsService {
             log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
             recreateWeb3jHttp();
             ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+        } catch (Exception e) {
+            if (isResponseTooLarge(e)) {
+                log.warn("Response too large for block range {} - {} (likely OOM during deserialization). Bisecting.", startBlock, endBlock);
+                if (startBlock.equals(endBlock)) {
+                    log.error("Response too large even for single block {}. Skipping.", startBlock);
+                    return;
+                }
+                BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
+                pushHistoricalData(subscription, startBlock, middle);
+                pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
+                return;
+            }
+            throw e;
         }
 
         if (ethLog.hasError() || ethLog.getLogs() == null) {
@@ -584,6 +597,19 @@ public class LogsService {
 
         subscription.sendHistorical(historicalLogs);
         log.info("Finished historical backfill for client. Sent {} logs.", historicalLogs.size());
+    }
+
+    private static boolean isResponseTooLarge(Throwable t) {
+        while (t != null) {
+            if (t instanceof OutOfMemoryError) {
+                return true;
+            }
+            if (t.getMessage() != null && t.getMessage().contains("Java heap space")) {
+                return true;
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     private synchronized void recreateWeb3jHttp() {
