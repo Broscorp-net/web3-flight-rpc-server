@@ -28,6 +28,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -41,17 +42,42 @@ import java.util.stream.Collectors;
 @Slf4j
 public class LogsService {
 
-    private final Web3j web3jWebSocket;
+    private volatile Web3j web3jWebSocket;
     private volatile Web3j web3jHttp;
     private final Supplier<Web3j> web3jHttpFactory;
 
     private final ExecutorService workerExecutor;
     private final List<LogSubscription> subscriptions = new CopyOnWriteArrayList<>();
-    private final WebSocketService webSocketService;
+    private volatile WebSocketService webSocketService;
+    private final Supplier<WebSocketService> webSocketServiceFactory;
     private final BigInteger maxBlockRange;
     private Disposable aggregatedSubscription;
+    private Disposable newHeadsHeartbeat;
+    private Map<String, Object> currentWssFilterParams;
+    private final AtomicBoolean reconnecting = new AtomicBoolean(false);
     private final int sleepBeforeRequestMlSec;
     private final int subscriptionMinutesTimeOut;
+    private final int heartbeatTimeoutSeconds;
+
+    private static final int DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 60;
+    private static final int MAX_RECONNECT_DELAY_SEC = 60;
+
+    private static final AtomicBoolean backgroundOomDetected = new AtomicBoolean(false);
+
+    static {
+        Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            if (throwable instanceof OutOfMemoryError) {
+                backgroundOomDetected.set(true);
+            }
+            if (prev != null) {
+                prev.uncaughtException(thread, throwable);
+            } else {
+                System.err.println("Exception in thread \"" + thread.getName() + "\" " + throwable);
+                throwable.printStackTrace(System.err);
+            }
+        });
+    }
 
     private static class LogResponse extends Response<Log> {
     }
@@ -59,16 +85,17 @@ public class LogsService {
     private static class LogNotification extends Notification<Log> {
     }
 
+    private static class NewHeadResponse extends Response<Object> {
+    }
+
+    private static class NewHeadNotification extends Notification<Object> {
+    }
+
     public LogsService(Web3j web3jWebSocket,
                        Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange) {
-        this(web3jWebSocket,
-                web3jHttpFactory,
-                maxBlockRange,
-                null,
-                Executors.newVirtualThreadPerTaskExecutor(),
-                500,
-                3);
+        this(web3jWebSocket, web3jHttpFactory, maxBlockRange,
+                Executors.newVirtualThreadPerTaskExecutor(), 500, 3);
     }
 
     public LogsService(Web3j web3jWebSocket,
@@ -76,43 +103,74 @@ public class LogsService {
                        int maxBlockRange,
                        ExecutorService executor,
                        int sleepBeforeRequestMlSec) {
-        this(web3jWebSocket,
-                web3jHttpFactory,
-                maxBlockRange,
-                null,
-                executor,
-                sleepBeforeRequestMlSec,
-                3);
+        this(web3jWebSocket, web3jHttpFactory, maxBlockRange,
+                executor, sleepBeforeRequestMlSec, 3);
     }
 
-    public LogsService(Web3j web3jWebSocket,
-                       Supplier<Web3j> web3jHttpFactory,
+    private LogsService(Web3j web3jWebSocket,
+                        Supplier<Web3j> web3jHttpFactory,
+                        int maxBlockRange,
+                        ExecutorService executor,
+                        int sleepBeforeRequestMlSec,
+                        int subscriptionMinutesTimeOut) {
+        this.web3jWebSocket = web3jWebSocket;
+        this.web3jHttpFactory = web3jHttpFactory;
+        this.web3jHttp = web3jHttpFactory.get();
+        this.webSocketService = null;
+        this.webSocketServiceFactory = null;
+        this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
+        this.workerExecutor = executor;
+        this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
+        this.subscriptionMinutesTimeOut = subscriptionMinutesTimeOut;
+        this.heartbeatTimeoutSeconds = DEFAULT_HEARTBEAT_TIMEOUT_SECONDS;
+    }
+
+    public LogsService(Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange,
-                       WebSocketService webSocketService) {
-        this(web3jWebSocket,
-                web3jHttpFactory,
+                       Supplier<WebSocketService> webSocketServiceFactory) {
+        this(web3jHttpFactory,
                 maxBlockRange,
-                webSocketService,
+                webSocketServiceFactory,
                 Executors.newVirtualThreadPerTaskExecutor(),
                 Integer.parseInt(System.getenv("SLEEP_BEFORE_WEB3_REQUEST_ML_SEC")),
                 3);
     }
 
-    public LogsService(Web3j web3jWebSocket,
-                       Supplier<Web3j> web3jHttpFactory,
+    public LogsService(Supplier<Web3j> web3jHttpFactory,
                        int maxBlockRange,
-                       WebSocketService webSocketService,
+                       Supplier<WebSocketService> webSocketServiceFactory,
                        ExecutorService executor,
                        int sleepBeforeRequestMlSec,
                        int subscriptionMinutesTimeOut) {
-        this.web3jWebSocket = web3jWebSocket;
+        this(web3jHttpFactory, maxBlockRange, webSocketServiceFactory,
+                executor, sleepBeforeRequestMlSec,
+                subscriptionMinutesTimeOut, DEFAULT_HEARTBEAT_TIMEOUT_SECONDS);
+    }
+
+    public LogsService(Supplier<Web3j> web3jHttpFactory,
+                       int maxBlockRange,
+                       Supplier<WebSocketService> webSocketServiceFactory,
+                       ExecutorService executor,
+                       int sleepBeforeRequestMlSec,
+                       int subscriptionMinutesTimeOut,
+                       int heartbeatTimeoutSeconds) {
         this.web3jHttpFactory = web3jHttpFactory;
         this.web3jHttp = web3jHttpFactory.get();
-        this.webSocketService = webSocketService;
+        this.webSocketServiceFactory = webSocketServiceFactory;
         this.maxBlockRange = BigInteger.valueOf(maxBlockRange);
         this.workerExecutor = executor;
         this.sleepBeforeRequestMlSec = sleepBeforeRequestMlSec;
         this.subscriptionMinutesTimeOut = subscriptionMinutesTimeOut;
+        this.heartbeatTimeoutSeconds = heartbeatTimeoutSeconds;
+
+        try {
+            WebSocketService wss = webSocketServiceFactory.get();
+            wss.connect();
+            this.webSocketService = wss;
+            this.web3jWebSocket = Web3j.build(wss);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create initial WebSocket connection", e);
+        }
     }
 
     /**
@@ -141,21 +199,49 @@ public class LogsService {
     }
 
     private synchronized void rebuildAggregatedWeb3jSubscription() {
-        if (aggregatedSubscription != null) {
-            aggregatedSubscription.dispose();
-            aggregatedSubscription = null;
-            log.info("No active subscriptions. Aggregated subscription not created.");
-        }
-
         if (subscriptions.isEmpty()) {
+            stopWssHeartbeat();
+            if (aggregatedSubscription != null) {
+                aggregatedSubscription.dispose();
+                aggregatedSubscription = null;
+                currentWssFilterParams = null;
+                log.info("No active subscriptions. Aggregated subscription disposed.");
+            }
             return;
         }
 
         if (webSocketService != null) {
-            // Prefer true WebSocket subscriptions to avoid HTTP polling filters.
-            aggregatedSubscription = subscribeViaWebSocket();
-            log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
+            Map<String, Object> newFilterParams = buildWssFilterParams();
+
+            // Skip rebuild if WSS is alive and filter hasn't changed
+            if (aggregatedSubscription != null
+                    && !aggregatedSubscription.isDisposed()
+                    && newFilterParams.equals(currentWssFilterParams)) {
+                log.info("WSS filter unchanged, skipping rebuild. {} subscriptions active.",
+                        subscriptions.size());
+                return;
+            }
+
+            if (aggregatedSubscription != null) {
+                aggregatedSubscription.dispose();
+                log.info("Disposed previous aggregated subscription.");
+            }
+
+            try {
+                aggregatedSubscription = subscribeViaWebSocket(newFilterParams);
+                currentWssFilterParams = newFilterParams;
+                startWssHeartbeat();
+                log.info("Aggregated WebSocket subscription created for {} subscriptions.", subscriptions.size());
+            } catch (Exception e) {
+                log.error("Failed to create WebSocket subscription, scheduling reconnect.", e);
+                currentWssFilterParams = null;
+                workerExecutor.submit(this::reconnectWebSocket);
+            }
         } else {
+            if (aggregatedSubscription != null) {
+                aggregatedSubscription.dispose();
+            }
+
             // Fallback: Build filter and use ethLogFlowable (may use HTTP-style filters).
             EthFilter aggregatedFilter = buildRealtimeFilter();
             aggregatedSubscription = web3jWebSocket.ethLogFlowable(aggregatedFilter)
@@ -174,7 +260,97 @@ public class LogsService {
         }
     }
 
-    private Disposable subscribeViaWebSocket() {
+    /**
+     * Subscribes to {@code newHeads} on the WSS connection as a heartbeat.
+     * On mainnet, a new block arrives every ~12 seconds. If no block arrives
+     * within {@code heartbeatTimeoutSeconds}, the connection is considered dead
+     * and a reconnect is triggered.
+     */
+    private void startWssHeartbeat() {
+        stopWssHeartbeat();
+
+        Request<?, NewHeadResponse> request = new Request<>(
+                "eth_subscribe",
+                List.of("newHeads"),
+                webSocketService,
+                NewHeadResponse.class
+        );
+
+        log.info("Starting newHeads heartbeat (timeout={}s)", heartbeatTimeoutSeconds);
+
+        newHeadsHeartbeat = webSocketService.subscribe(
+                        request,
+                        "eth_unsubscribe",
+                        NewHeadNotification.class
+                )
+                .timeout(heartbeatTimeoutSeconds, TimeUnit.SECONDS)
+                .subscribe(
+                        notification -> log.debug("Heartbeat: new block received"),
+                        err -> {
+                            log.error("WSS heartbeat failed (no newHeads for {}s). Reconnecting.", heartbeatTimeoutSeconds, err);
+                            currentWssFilterParams = null;
+                            reconnectWebSocket();
+                        }
+                );
+    }
+
+    private void stopWssHeartbeat() {
+        if (newHeadsHeartbeat != null && !newHeadsHeartbeat.isDisposed()) {
+            newHeadsHeartbeat.dispose();
+            newHeadsHeartbeat = null;
+            log.info("Stopped newHeads heartbeat.");
+        }
+    }
+
+    /**
+     * Closes the WebSocket connection, reconnects with exponential backoff,
+     * and rebuilds all subscriptions once connected.
+     * <p>
+     * Uses an {@link AtomicBoolean} guard to prevent concurrent reconnect attempts
+     * (e.g. heartbeat timeout and logs error firing simultaneously).
+     */
+    private void reconnectWebSocket() {
+        if (!reconnecting.compareAndSet(false, true)) {
+            log.info("WebSocket reconnect already in progress, skipping.");
+            return;
+        }
+        try {
+            try {
+                webSocketService.close();
+            } catch (Exception e) {
+                log.warn("Error closing websocket: ", e);
+            }
+
+            int delaySec = 3;
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    // Create a fresh WebSocketService instance because close() terminates
+                    // the internal ScheduledThreadPoolExecutor which cannot be restarted.
+                    WebSocketService newWss = webSocketServiceFactory.get();
+                    newWss.connect();
+                    this.webSocketService = newWss;
+                    this.web3jWebSocket = Web3j.build(newWss);
+                    log.info("WebSocket reconnected successfully with new service instance.");
+                    break;
+                } catch (Exception e) {
+                    log.error("WebSocket reconnect failed, retrying in {}s.", delaySec, e);
+                    try {
+                        Thread.sleep(delaySec * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    delaySec = Math.min(delaySec * 2, MAX_RECONNECT_DELAY_SEC);
+                }
+            }
+
+            rebuildAggregatedWeb3jSubscription();
+        } finally {
+            reconnecting.set(false);
+        }
+    }
+
+    private Map<String, Object> buildWssFilterParams() {
         boolean subscribeAllAddresses = subscriptions.stream()
                 .map(Subscription::getClientRequest)
                 .anyMatch(req -> req.getContractAddresses() == null || req.getContractAddresses().isEmpty());
@@ -188,6 +364,7 @@ public class LogsService {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .distinct()
+                .sorted()
                 .toList();
 
         List<String> allTopics = subscriptions.stream()
@@ -195,6 +372,7 @@ public class LogsService {
                 .filter(Objects::nonNull)
                 .flatMap(Collection::stream)
                 .distinct()
+                .sorted()
                 .toList();
 
         Map<String, Object> filterParams = new LinkedHashMap<>();
@@ -203,12 +381,14 @@ public class LogsService {
             filterParams.put("address", allAddresses);
         }
 
-        // Topics: Ethereum allows up to 4 positions.
-        // Put all event signatures into position 0.
         if (!subscribeAllTopics && !allTopics.isEmpty()) {
             filterParams.put("topics", List.of(allTopics));
         }
 
+        return filterParams;
+    }
+
+    private Disposable subscribeViaWebSocket(Map<String, Object> filterParams) {
         Request<?, LogResponse> request = new Request<>(
                 "eth_subscribe",
                 List.of("logs", filterParams),
@@ -216,8 +396,13 @@ public class LogsService {
                 LogResponse.class
         );
 
+        int addressCount = filterParams.containsKey("address")
+                ? ((List<?>) filterParams.get("address")).size() : 0;
+        int topicCount = filterParams.containsKey("topics")
+                ? ((List<?>) ((List<?>) filterParams.get("topics")).getFirst()).size() : 0;
+
         log.info("Created WebSocket subscription: {} addresses, {} topics (all in slot 0).",
-                allAddresses.size(), allTopics.size());
+                addressCount, topicCount);
 
         return webSocketService.subscribe(
                         request,
@@ -230,30 +415,12 @@ public class LogsService {
                             logObj.getBlockNumber(), logObj.getTransactionHash(), logObj.getTopics());
                     return logObj;
                 })
-                .timeout(subscriptionMinutesTimeOut, TimeUnit.MINUTES)
                 .subscribe(
                         this::onNewRealtimeLog,
                         err -> {
-                            log.error("Realtime subscription error / timeout: ", err);
-                            try {
-                                try {
-                                    webSocketService.close();
-                                } catch (Exception e) {
-                                    log.warn("Error closing websocket: ", e);
-                                }
-                                try {
-                                    webSocketService.connect();
-                                } catch (Exception e) {
-                                    log.error("Error reconnecting websocket: ", e);
-                                }
-                            } finally {
-                                try {
-                                    Thread.sleep(3000);
-                                } catch (InterruptedException e) {
-                                    Thread.currentThread().interrupt();
-                                }
-                                rebuildAggregatedWeb3jSubscription();
-                            }
+                            log.error("Realtime logs subscription error: ", err);
+                            currentWssFilterParams = null;
+                            reconnectWebSocket();
                         }
                 );
     }
@@ -396,12 +563,30 @@ public class LogsService {
         }
 
         EthLog ethLog;
+        backgroundOomDetected.set(false);
         try {
-            ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
-        } catch (ClientConnectionException e) {
-            log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
-            recreateWeb3jHttp();
-            ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+            try {
+                ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+            } catch (ClientConnectionException e) {
+                if (isResponseTooLarge(e)) {
+                    throw e;
+                }
+                log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
+                recreateWeb3jHttp();
+                ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+            }
+        } catch (OutOfMemoryError oom) {
+            log.warn("OOM for block range {} - {}. Bisecting.", startBlock, endBlock);
+            bisectOrSkip(subscription, startBlock, endBlock);
+            return;
+        } catch (Exception e) {
+            if (isResponseTooLarge(e) || backgroundOomDetected.getAndSet(false)) {
+                log.warn("Response too large for block range {} - {} (background OOM detected). Bisecting.",
+                        startBlock, endBlock);
+                bisectOrSkip(subscription, startBlock, endBlock);
+                return;
+            }
+            throw e;
         }
 
         if (ethLog.hasError() || ethLog.getLogs() == null) {
@@ -409,21 +594,14 @@ public class LogsService {
                     ? ethLog.getError().getMessage()
                     : "Node returned a null result for logs query.";
 
-            if (!errorMessage.contains("query returned more than 10000 results")) {
+            if (!errorMessage.contains("query returned more than 10000 results")
+                    && !errorMessage.toLowerCase().contains("response is too big")) {
                 log.error("Failed to get historical logs from node: {}", errorMessage);
                 throw new RuntimeException("Failed to fetch historical logs: " + errorMessage);
             }
 
-            if (startBlock.equals(endBlock)) {
-                log.error("Failed to get logs for single block {}. Block has >10k logs. Skipping.", startBlock);
-                return;
-            }
-
             log.warn(errorMessage);
-            BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
-            log.debug("Recursing historical logs with middle {}", middle);
-            pushHistoricalData(subscription, startBlock, middle);
-            pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
+            bisectOrSkip(subscription, startBlock, endBlock);
             return;
         }
 
@@ -433,6 +611,36 @@ public class LogsService {
 
         subscription.sendHistorical(historicalLogs);
         log.info("Finished historical backfill for client. Sent {} logs.", historicalLogs.size());
+    }
+
+    private void bisectOrSkip(LogSubscription subscription, BigInteger startBlock, BigInteger endBlock) throws Exception {
+        if (startBlock.equals(endBlock)) {
+            log.error("Response too large even for single block {}. Skipping.", startBlock);
+            return;
+        }
+        BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
+        pushHistoricalData(subscription, startBlock, middle);
+        pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
+    }
+
+    private static boolean isResponseTooLarge(Throwable t) {
+        while (t != null) {
+            if (t instanceof OutOfMemoryError) {
+                return true;
+            }
+            if (t.getMessage() != null) {
+                String msg = t.getMessage().toLowerCase();
+                if (msg.contains("java heap space")
+                        || msg.contains("too many logs")
+                        || msg.contains("query returned more than")
+                        || msg.contains("response is too big")
+                        || msg.contains("response size exceeded")) {
+                    return true;
+                }
+            }
+            t = t.getCause();
+        }
+        return false;
     }
 
     private synchronized void recreateWeb3jHttp() {

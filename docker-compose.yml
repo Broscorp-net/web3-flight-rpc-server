@@ -22,8 +22,8 @@ services:
     ports:
       - "8815:8815"
     environment:
-      - ETHEREUM_NODE_URL=ws://hardhat:8545
-      - ETHEREUM_NODE_HTTP_URL=http://hardhat:8545
+      - WEBSOCKET_NODE_URL=ws://hardhat:8545
+      - HTTP_NODE_URL=http://hardhat:8545
       - FLIGHT_PORT=8815
       - MAX_BLOCK_RANGE=500
       - SLEEP_BEFORE_WEB3_REQUEST_ML_SEC=100

@@ -447,10 +447,9 @@ class LogsServiceTest {
         Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
 
         logsService = new LogsService(
-                web3jMock,
                 web3jHttpFactory,
                 500,
-                webSocketServiceMock,
+                () -> webSocketServiceMock,
                 testExecutor,
                 0,
                 5
@@ -495,9 +494,16 @@ class LogsServiceTest {
 
         // THEN
         List<Request> allWsRequests = wsRequestCaptor.getAllValues();
-        assertThat(allWsRequests).hasSize(2);
+        // 4 subscribe calls: logs + newHeads heartbeat for each of the 2 rebuilds
+        assertThat(allWsRequests).hasSize(4);
 
-        Request<?, ?> wsRequest = allWsRequests.getLast();
+        // Filter to only "logs" subscribe requests (skip "newHeads" heartbeat requests)
+        List<Request> logsRequests = allWsRequests.stream()
+                .filter(r -> r.getParams().size() == 2 && "logs".equals(r.getParams().get(0)))
+                .toList();
+        assertThat(logsRequests).hasSize(2);
+
+        Request<?, ?> wsRequest = logsRequests.getLast();
         assertThat(wsRequest.getMethod()).isEqualTo("eth_subscribe");
 
         List<?> params = wsRequest.getParams();
@@ -645,6 +651,12 @@ class LogsServiceTest {
         when(okReq.send()).thenReturn(okBlockNumber);
         doReturn(okReq).when(httpMock2).ethBlockNumber();
 
+        EthLog ethLogMock = mock(EthLog.class);
+        when(ethLogMock.getLogs()).thenReturn(List.of());
+        Request<?, EthLog> getLogsRequestMock = mock(Request.class);
+        when(getLogsRequestMock.send()).thenReturn(ethLogMock);
+        doReturn(getLogsRequestMock).when(httpMock2).ethGetLogs(any());
+
         LogsRequest request = new LogsRequest();
         request.setStartBlock(latestBlock);
         request.setEndBlock(null);          // awaitingForRealTimeData = true
@@ -744,6 +756,81 @@ class LogsServiceTest {
         assertThat(agg).isNull();
     }
 
+
+    @Test
+    @SneakyThrows
+    void pushHistoricalData_whenOomDuringDeserialization_bisectsBlockRange() {
+        // GIVEN
+        Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
+        logsService = new LogsService(web3jMock, web3jHttpFactory, 10,
+                Executors.newSingleThreadExecutor(), 0);
+
+        // First call throws JsonMappingException wrapping OOM (simulating huge response),
+        // subsequent calls on smaller ranges succeed with empty logs.
+        com.fasterxml.jackson.databind.JsonMappingException oomException =
+                com.fasterxml.jackson.databind.JsonMappingException.from(
+                        (com.fasterxml.jackson.core.JsonParser) null,
+                        "Java heap space",
+                        new OutOfMemoryError("Java heap space")
+                );
+
+        EthLog okEthLog = mock(EthLog.class);
+        when(okEthLog.getLogs()).thenReturn(List.of());
+
+        Request<?, EthLog> failingRequest = mock(Request.class);
+        when(failingRequest.send()).thenThrow(oomException);
+
+        Request<?, EthLog> okRequest = mock(Request.class);
+        when(okRequest.send()).thenReturn(okEthLog);
+
+        // First call fails, rest succeed
+        doReturn(failingRequest)
+                .doReturn(okRequest)
+                .doReturn(okRequest)
+                .when(web3jHttpMock).ethGetLogs(any());
+
+        LogsRequest request = new LogsRequest();
+        when(subscriptionMock.getClientRequest()).thenReturn(request);
+
+        // WHEN
+        invokePushHistoricalData(logsService, subscriptionMock,
+                BigInteger.ONE, BigInteger.valueOf(3));
+
+        // THEN: should have bisected - first call fails, then two smaller ranges succeed
+        verify(web3jHttpMock, atLeastOnce()).ethGetLogs(any());
+        verify(subscriptionMock, never()).error(any());
+    }
+
+    @Test
+    @SneakyThrows
+    void pushHistoricalData_whenOomOnSingleBlock_skipsWithoutThrowing() {
+        // GIVEN
+        Supplier<Web3j> web3jHttpFactory = () -> web3jHttpMock;
+        logsService = new LogsService(web3jMock, web3jHttpFactory, 10,
+                Executors.newSingleThreadExecutor(), 0);
+
+        com.fasterxml.jackson.databind.JsonMappingException oomException =
+                com.fasterxml.jackson.databind.JsonMappingException.from(
+                        (com.fasterxml.jackson.core.JsonParser) null,
+                        "Java heap space",
+                        new OutOfMemoryError("Java heap space")
+                );
+
+        Request<?, EthLog> failingRequest = mock(Request.class);
+        when(failingRequest.send()).thenThrow(oomException);
+        doReturn(failingRequest).when(web3jHttpMock).ethGetLogs(any());
+
+        LogsRequest request = new LogsRequest();
+        when(subscriptionMock.getClientRequest()).thenReturn(request);
+
+        // WHEN: single block range, should skip gracefully
+        invokePushHistoricalData(logsService, subscriptionMock,
+                BigInteger.ONE, BigInteger.ONE);
+
+        // THEN: no data sent, no error thrown
+        verify(subscriptionMock, never()).sendHistorical(any());
+        verify(subscriptionMock, never()).error(any());
+    }
 
     // ---------- reflection helpers ----------
 
