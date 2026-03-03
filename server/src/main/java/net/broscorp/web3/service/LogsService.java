@@ -568,6 +568,9 @@ public class LogsService {
             try {
                 ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
             } catch (ClientConnectionException e) {
+                if (isResponseTooLarge(e)) {
+                    throw e;
+                }
                 log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
                 recreateWeb3jHttp();
                 ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
@@ -625,8 +628,15 @@ public class LogsService {
             if (t instanceof OutOfMemoryError) {
                 return true;
             }
-            if (t.getMessage() != null && t.getMessage().contains("Java heap space")) {
-                return true;
+            if (t.getMessage() != null) {
+                String msg = t.getMessage().toLowerCase();
+                if (msg.contains("java heap space")
+                        || msg.contains("too many logs")
+                        || msg.contains("query returned more than")
+                        || msg.contains("response is too big")
+                        || msg.contains("response size exceeded")) {
+                    return true;
+                }
             }
             t = t.getCause();
         }
