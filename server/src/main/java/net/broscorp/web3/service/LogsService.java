@@ -62,6 +62,23 @@ public class LogsService {
     private static final int DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 60;
     private static final int MAX_RECONNECT_DELAY_SEC = 60;
 
+    private static final AtomicBoolean backgroundOomDetected = new AtomicBoolean(false);
+
+    static {
+        Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            if (throwable instanceof OutOfMemoryError) {
+                backgroundOomDetected.set(true);
+            }
+            if (prev != null) {
+                prev.uncaughtException(thread, throwable);
+            } else {
+                System.err.println("Exception in thread \"" + thread.getName() + "\" " + throwable);
+                throwable.printStackTrace(System.err);
+            }
+        });
+    }
+
     private static class LogResponse extends Response<Log> {
     }
 
@@ -546,22 +563,24 @@ public class LogsService {
         }
 
         EthLog ethLog;
+        backgroundOomDetected.set(false);
         try {
-            ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
-        } catch (ClientConnectionException e) {
-            log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
-            recreateWeb3jHttp();
-            ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+            try {
+                ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+            } catch (ClientConnectionException e) {
+                log.warn("HTTP client connection error while fetching historical logs. Recreating client and retrying once.", e);
+                recreateWeb3jHttp();
+                ethLog = web3jHttp.ethGetLogs(historicalFilter).send();
+            }
+        } catch (OutOfMemoryError oom) {
+            log.warn("OOM for block range {} - {}. Bisecting.", startBlock, endBlock);
+            bisectOrSkip(subscription, startBlock, endBlock);
+            return;
         } catch (Exception e) {
-            if (isResponseTooLarge(e)) {
-                log.warn("Response too large for block range {} - {} (likely OOM during deserialization). Bisecting.", startBlock, endBlock);
-                if (startBlock.equals(endBlock)) {
-                    log.error("Response too large even for single block {}. Skipping.", startBlock);
-                    return;
-                }
-                BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
-                pushHistoricalData(subscription, startBlock, middle);
-                pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
+            if (isResponseTooLarge(e) || backgroundOomDetected.getAndSet(false)) {
+                log.warn("Response too large for block range {} - {} (background OOM detected). Bisecting.",
+                        startBlock, endBlock);
+                bisectOrSkip(subscription, startBlock, endBlock);
                 return;
             }
             throw e;
@@ -578,16 +597,8 @@ public class LogsService {
                 throw new RuntimeException("Failed to fetch historical logs: " + errorMessage);
             }
 
-            if (startBlock.equals(endBlock)) {
-                log.error("Failed to get logs for single block {}. Block has >10k logs. Skipping.", startBlock);
-                return;
-            }
-
             log.warn(errorMessage);
-            BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
-            log.debug("Recursing historical logs with middle {}", middle);
-            pushHistoricalData(subscription, startBlock, middle);
-            pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
+            bisectOrSkip(subscription, startBlock, endBlock);
             return;
         }
 
@@ -597,6 +608,16 @@ public class LogsService {
 
         subscription.sendHistorical(historicalLogs);
         log.info("Finished historical backfill for client. Sent {} logs.", historicalLogs.size());
+    }
+
+    private void bisectOrSkip(LogSubscription subscription, BigInteger startBlock, BigInteger endBlock) throws Exception {
+        if (startBlock.equals(endBlock)) {
+            log.error("Response too large even for single block {}. Skipping.", startBlock);
+            return;
+        }
+        BigInteger middle = startBlock.add(endBlock).divide(BigInteger.TWO);
+        pushHistoricalData(subscription, startBlock, middle);
+        pushHistoricalData(subscription, middle.add(BigInteger.ONE), endBlock);
     }
 
     private static boolean isResponseTooLarge(Throwable t) {
