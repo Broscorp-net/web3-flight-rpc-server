@@ -8,7 +8,13 @@ services:
       - web3-flight
     command: npx hardhat node --hostname 0.0.0.0 --port 8545
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget --spider -q http://127.0.0.1:8545 2>&1 || exit 1"]
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "wget --spider -q http://127.0.0.1:8545 2>&1 || exit 1",
+        ]
       interval: 5s
       timeout: 3s
       retries: 15
@@ -21,12 +27,33 @@ services:
     container_name: web3-flight-server
     ports:
       - "8815:8815"
+      - "9091:9091"
     environment:
+      # --- Required ---
       - WEBSOCKET_NODE_URL=ws://hardhat:8545
       - HTTP_NODE_URL=http://hardhat:8545
       - FLIGHT_PORT=8815
-      - MAX_BLOCK_RANGE=500
-      - SLEEP_BEFORE_WEB3_REQUEST_ML_SEC=100
+      # --- Observability ---
+      # Prometheus exporter at /metrics (default: 9091).
+      - METRICS_PORT=9091
+      # --- Cache ---
+      - DB_PATH=/app/rocksdb_cache
+      - INITIAL_BLOCK=0
+      # RETENTION_BLOCKS: unset -> keep forever (dev default).
+      # In prod, set to a multiple of 1000, e.g. 100000 (~2 weeks of L1 blocks).
+      # - RETENTION_BLOCKS=100000
+      # --- Cold tier (S3) ---
+      # ARCHIVE_MODE: off|optional|required
+      #   off      - no S3 writes; pruned data is lost permanently (dev).
+      #   optional - S3 if configured, otherwise warn and drop cold tier (default).
+      #   required - fail startup if S3 isn't fully configured (prod).
+      - ARCHIVE_MODE=off
+      # - S3_BUCKET=my-web3-flight-archive
+      # - S3_REGION=us-east-1
+      # - AWS_ACCESS_KEY=...
+      # - AWS_SECRET_KEY=...
+    volumes:
+      - rocksdb_data:/app/rocksdb_cache
     networks:
       - web3-flight
     depends_on:
@@ -71,7 +98,9 @@ services:
         condition: service_healthy
     command: start-notebook.sh --NotebookApp.token='ethereum' --NotebookApp.password=''
 
-
 networks:
   web3-flight:
     driver: bridge
+
+volumes:
+  rocksdb_data:
