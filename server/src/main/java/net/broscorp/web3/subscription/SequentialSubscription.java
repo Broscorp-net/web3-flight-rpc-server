@@ -10,6 +10,7 @@ import net.broscorp.web3.metrics.Metrics;
 import net.broscorp.web3.service.ArchiveManager;
 import net.broscorp.web3.service.BlockchainCache;
 import net.broscorp.web3.service.BlockchainCache.CacheResult;
+import org.apache.arrow.flight.CallStatus;
 import org.apache.arrow.flight.FlightProducer;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.util.AutoCloseables;
@@ -81,6 +82,14 @@ public abstract class SequentialSubscription<
             if (!isTerminated.get() && !listener.isCancelled()) {
                 listener.completed();
             }
+        } catch (BackfillPendingException e) {
+            metrics.subscriptionErrorsTotal.labels(datasetName()).inc();
+            log.info("Subscription rejected: {}", e.getMessage());
+            listener.error(
+                CallStatus.UNAVAILABLE
+                    .withDescription(e.getMessage())
+                    .toRuntimeException()
+            );
         } catch (Exception e) {
             metrics.subscriptionErrorsTotal.labels(datasetName()).inc();
             log.error("Error in sequential subscription loop", e);
@@ -112,6 +121,7 @@ public abstract class SequentialSubscription<
         return switch (r.status()) {
             case LOADED -> r.data();
             case PRUNED -> fetchFromArchive(blockNumber);
+            case BACKFILLING -> throw new BackfillPendingException(blockNumber);
         };
     }
 

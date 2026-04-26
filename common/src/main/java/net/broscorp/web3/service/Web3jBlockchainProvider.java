@@ -4,25 +4,27 @@ import java.math.BigInteger;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.web3j.protocol.Web3j;
-import org.web3j.protocol.core.BatchRequest;
+import org.web3j.protocol.Web3jService;
 import org.web3j.protocol.core.DefaultBlockParameterNumber;
+import org.web3j.protocol.core.Request;
+import org.web3j.protocol.core.Response;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.EthLog;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 @Slf4j
 public class Web3jBlockchainProvider implements BlockchainProvider {
 
     private final Web3j web3j;
+    private final Web3jService web3jService;
 
-    public Web3jBlockchainProvider(Web3j web3j) {
+    public Web3jBlockchainProvider(Web3j web3j, Web3jService web3jService) {
         this.web3j = web3j;
+        this.web3jService = web3jService;
     }
 
     @Override
@@ -53,16 +55,18 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
             .ethGetLogs(filter)
             .sendAsync();
 
-        return CompletableFuture.allOf(blockFuture, logsFuture).thenCompose(
-            v -> {
+        CompletableFuture<EthBlockReceipts> receiptsFuture =
+            ethGetBlockReceipts(blockNumber).sendAsync();
+
+        return CompletableFuture.allOf(blockFuture, logsFuture, receiptsFuture)
+            .thenApply(v -> {
                 EthBlock blockRes = blockFuture.join();
                 EthLog logsRes = logsFuture.join();
+                EthBlockReceipts receiptsRes = receiptsFuture.join();
 
                 if (blockRes.getBlock() == null) {
-                    return CompletableFuture.failedFuture(
-                        new RuntimeException(
-                            "Block " + blockNumber + " not found"
-                        )
+                    throw new RuntimeException(
+                        "Block " + blockNumber + " not found"
                     );
                 }
 
@@ -75,54 +79,39 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
                         )
                         .toList();
 
-                return fetchReceipts(blockRes.getBlock()).thenApply(receipts ->
-                    new FullBlockData(blockRes.getBlock(), logs, receipts)
-                );
-            }
+                List<ExtendedTransactionReceipt> receiptList =
+                    receiptsRes.getBlockReceipts();
+                Map<String, ExtendedTransactionReceipt> receipts =
+                    receiptList == null
+                        ? Collections.emptyMap()
+                        : receiptList
+                            .stream()
+                            .collect(
+                                Collectors.toMap(
+                                    ExtendedTransactionReceipt::getTransactionHash,
+                                    r -> r
+                                )
+                            );
+
+                return new FullBlockData(blockRes.getBlock(), logs, receipts);
+            });
+    }
+
+    private Request<?, EthBlockReceipts> ethGetBlockReceipts(
+        BigInteger blockNumber
+    ) {
+        return new Request<>(
+            "eth_getBlockReceipts",
+            List.of("0x" + blockNumber.toString(16)),
+            web3jService,
+            EthBlockReceipts.class
         );
     }
 
-    private CompletableFuture<Map<String, TransactionReceipt>> fetchReceipts(
-        EthBlock.Block block
-    ) {
-        List<String> txHashes = block
-            .getTransactions()
-            .stream()
-            .map(tx -> (String) tx.get())
-            .toList();
-
-        if (txHashes.isEmpty()) {
-            return CompletableFuture.completedFuture(Collections.emptyMap());
+    public static class EthBlockReceipts
+        extends Response<List<ExtendedTransactionReceipt>> {
+        public List<ExtendedTransactionReceipt> getBlockReceipts() {
+            return getResult();
         }
-
-        BatchRequest batch = web3j.newBatch();
-        txHashes.forEach(hash ->
-            batch.add(web3j.ethGetTransactionReceipt(hash))
-        );
-
-        return batch
-            .sendAsync()
-            .thenApply(batchResponse -> {
-                List<TransactionReceipt> receipts = batchResponse
-                    .getResponses()
-                    .stream()
-                    .map(res ->
-                        (
-                            (org.web3j.protocol.core.methods.response.EthGetTransactionReceipt) res
-                        ).getTransactionReceipt()
-                    )
-                    .filter(Optional::isPresent)
-                    .map(Optional::get)
-                    .toList();
-
-                return receipts
-                    .stream()
-                    .collect(
-                        Collectors.toMap(
-                            TransactionReceipt::getTransactionHash,
-                            r -> r
-                        )
-                    );
-            });
     }
 }

@@ -5,6 +5,7 @@ import io.prometheus.client.hotspot.DefaultExports;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.archive.ArchiveKey;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
 import net.broscorp.web3.producer.Producer;
@@ -56,6 +57,7 @@ public class FlightRpcServer {
         String ethereumNodeHttpUrl = System.getenv("HTTP_NODE_URL");
         String initialBlockString = System.getenv("INITIAL_BLOCK");
         String retentionBlocksString = System.getenv("RETENTION_BLOCKS");
+        String backfillBlocksString = System.getenv("BACKFILL_BLOCKS");
         String dbPath = System.getenv("DB_PATH");
 
         String archiveModeString = System.getenv("ARCHIVE_MODE");
@@ -77,16 +79,20 @@ public class FlightRpcServer {
             retentionBlocksString != null
                 ? Long.parseLong(retentionBlocksString)
                 : null;
+        long backfillBlocks =
+            backfillBlocksString != null
+                ? Long.parseLong(backfillBlocksString)
+                : BlockchainIngestor.DEFAULT_BACKFILL_BLOCKS;
         ArchiveMode archiveMode = ArchiveMode.parse(archiveModeString);
 
         if (
             retentionBlocks != null &&
-            retentionBlocks % BlockchainIngestor.ARCHIVE_CHUNK_SIZE != 0
+            retentionBlocks % ArchiveKey.CHUNK_SIZE != 0
         ) {
             log.error(
                 "RETENTION_BLOCKS ({}) must be a multiple of ARCHIVE_CHUNK_SIZE ({})",
                 retentionBlocks,
-                BlockchainIngestor.ARCHIVE_CHUNK_SIZE
+                ArchiveKey.CHUNK_SIZE
             );
             System.exit(-1);
         }
@@ -133,7 +139,8 @@ public class FlightRpcServer {
             System.exit(-1);
         }
         Web3j web3WebSocket = Web3j.build(blocksWss);
-        Web3j web3Http = Web3j.build(new HttpService(ethereumNodeHttpUrl));
+        HttpService web3HttpService = new HttpService(ethereumNodeHttpUrl);
+        Web3j web3Http = Web3j.build(web3HttpService);
 
         Metrics metrics = Metrics.forDefaultRegistry();
         DefaultExports.initialize();
@@ -162,10 +169,13 @@ public class FlightRpcServer {
                 converter,
                 executorService,
                 web3WebSocket,
+                blocksWss,
                 web3Http,
+                web3HttpService,
                 metrics,
                 initialBlock,
                 retentionBlocks,
+                backfillBlocks,
                 useS3 ? s3Bucket : null,
                 s3Region,
                 awsAccessKey,
@@ -187,10 +197,13 @@ public class FlightRpcServer {
         Converter converter,
         ExecutorService executorService,
         Web3j web3WebSocket,
+        WebSocketService blocksWss,
         Web3j web3Http,
+        org.web3j.protocol.Web3jService web3HttpService,
         Metrics metrics,
         Long initialBlock,
         Long retentionBlocks,
+        long backfillBlocks,
         String s3Bucket,
         String s3Region,
         String awsAccessKey,
@@ -222,7 +235,8 @@ public class FlightRpcServer {
             }
 
             Web3jBlockchainProvider provider = new Web3jBlockchainProvider(
-                web3Http
+                web3Http,
+                web3HttpService
             );
             try (
                 BlockchainIngestor ingestor = new BlockchainIngestor(
@@ -231,10 +245,11 @@ public class FlightRpcServer {
                     converter,
                     ingestorAllocator,
                     web3WebSocket,
+                    blocksWss,
                     metrics
                 )
             ) {
-                ingestor.start(initialBlock, retentionBlocks, archiveManager);
+                ingestor.start(initialBlock, retentionBlocks, archiveManager, backfillBlocks);
 
                 SubscriptionFactory subscriptionFactory = new SubscriptionFactory(
                     rootAllocator,

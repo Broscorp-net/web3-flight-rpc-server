@@ -13,8 +13,10 @@
     <name>web3-flight-rpc-server</name>
 
     <modules>
+        <module>common</module>
         <module>client</module>
         <module>server</module>
+        <module>backfill</module>
     </modules>
 
     <properties>

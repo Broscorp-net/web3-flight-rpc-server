@@ -3,12 +3,18 @@ package net.broscorp.web3.service;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import io.prometheus.client.Histogram;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.archive.ArchiveKey;
+import net.broscorp.web3.archive.StreamingChunkWriter;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
 import org.apache.arrow.memory.BufferAllocator;
@@ -16,7 +22,6 @@ import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.types.pojo.Schema;
-import org.apache.arrow.vector.util.TransferPair;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -38,10 +43,9 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 @Slf4j
 public class S3ArchiveManager implements ArchiveManager {
 
-    public static final long CHUNK_SIZE = BlockchainIngestor.ARCHIVE_CHUNK_SIZE;
-
     private final S3Client s3;
     private final String bucket;
+    private final String keyPrefix;
     private final BlockchainCache cache;
     private final Converter converter;
     private final BufferAllocator allocator;
@@ -62,7 +66,15 @@ public class S3ArchiveManager implements ArchiveManager {
         Metrics metrics
     ) {
         this.s3 = s3;
-        this.bucket = bucket;
+        int slash = bucket.indexOf('/');
+        if (slash < 0) {
+            this.bucket = bucket;
+            this.keyPrefix = "";
+        } else {
+            this.bucket = bucket.substring(0, slash);
+            String prefix = bucket.substring(slash + 1);
+            this.keyPrefix = prefix.isEmpty() || prefix.endsWith("/") ? prefix : prefix + "/";
+        }
         this.cache = cache;
         this.converter = converter;
         this.allocator = allocator;
@@ -119,9 +131,9 @@ public class S3ArchiveManager implements ArchiveManager {
             () -> {
                 Histogram.Timer timer =
                     metrics.archiveColdReadDurationSeconds.startTimer();
-                long chunkStart = (blockNumber / CHUNK_SIZE) * CHUNK_SIZE;
-                long chunkEnd = chunkStart + CHUNK_SIZE;
-                String key = objectKey(dataset, chunkStart, chunkEnd);
+                long chunkStart = ArchiveKey.chunkStartFor(blockNumber);
+                long chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
+                String key = ArchiveKey.objectKey(keyPrefix, dataset, chunkStart, chunkEnd);
                 try {
                     byte[] object;
                     try {
@@ -167,33 +179,28 @@ public class S3ArchiveManager implements ArchiveManager {
         long endBlock,
         CacheLookup lookup
     ) throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (
-            VectorSchemaRoot target = VectorSchemaRoot.create(schema, allocator);
-            ArrowStreamWriter writer = new ArrowStreamWriter(
-                target,
-                null,
-                Channels.newChannel(bytes)
-            )
-        ) {
-            writer.start();
-            int batches = 0;
-            for (long n = startBlock; n < endBlock; n++) {
-                byte[] data = lookup.apply(n).orElse(null);
-                if (data == null) {
-                    log.warn(
-                        "Archive skip: no {} cached for block {}",
-                        dataset,
-                        n
-                    );
-                    continue;
+        Path tmp = Files.createTempFile("archive-" + dataset + "-", ".arrow");
+        try {
+            int batches;
+            try (
+                FileChannel ch = FileChannel.open(
+                    tmp,
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.TRUNCATE_EXISTING
+                );
+                StreamingChunkWriter w = new StreamingChunkWriter(allocator, schema, ch)
+            ) {
+                for (long n = startBlock; n < endBlock; n++) {
+                    byte[] ipc = lookup.apply(n).orElse(null);
+                    if (ipc == null) {
+                        log.warn("Chunk skip: no {} for block {}", dataset, n);
+                        continue;
+                    }
+                    w.appendBatch(ipc);
                 }
-                copyBatchInto(target, data);
-                writer.writeBatch();
-                target.clear();
-                batches++;
+                batches = w.batchesWritten();
             }
-            writer.end();
+
             if (batches == 0) {
                 log.warn(
                     "Archive skipped for {} [{}, {}): nothing cached",
@@ -203,36 +210,14 @@ public class S3ArchiveManager implements ArchiveManager {
                 );
                 return;
             }
-        }
 
-        String key = objectKey(dataset, startBlock, endBlock);
-        s3.putObject(
-            PutObjectRequest.builder().bucket(bucket).key(key).build(),
-            RequestBody.fromBytes(bytes.toByteArray())
-        );
-    }
-
-    private void copyBatchInto(VectorSchemaRoot target, byte[] singleBatchIpc)
-        throws Exception {
-        try (
-            ArrowStreamReader reader = new ArrowStreamReader(
-                new ByteArrayInputStream(singleBatchIpc),
-                allocator
-            )
-        ) {
-            reader.loadNextBatch();
-            VectorSchemaRoot src = reader.getVectorSchemaRoot();
-            int rows = src.getRowCount();
-            target.allocateNew();
-            for (int field = 0; field < src.getFieldVectors().size(); field++) {
-                TransferPair tp = src
-                    .getVector(field)
-                    .makeTransferPair(target.getVector(field));
-                for (int row = 0; row < rows; row++) {
-                    tp.copyValueSafe(row, row);
-                }
-            }
-            target.setRowCount(rows);
+            String key = ArchiveKey.objectKey(keyPrefix, dataset, startBlock, endBlock);
+            s3.putObject(
+                PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                RequestBody.fromFile(tmp)
+            );
+        } finally {
+            Files.deleteIfExists(tmp);
         }
     }
 
@@ -264,14 +249,6 @@ public class S3ArchiveManager implements ArchiveManager {
             }
             return out.toByteArray();
         }
-    }
-
-    private static String objectKey(
-        String dataset,
-        long startBlock,
-        long endBlock
-    ) {
-        return dataset + "/" + startBlock + "_" + endBlock + ".arrow";
     }
 
     public void close() {

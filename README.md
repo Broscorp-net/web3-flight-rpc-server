@@ -139,8 +139,10 @@ To build the project, run:
 mvn clean package
 ```
 
-This will create JAR file:
-- `server/target/server.jar` - The server component
+This will create the following JAR files:
+- `server/target/server.jar` - long-running Flight RPC server
+- `backfill/target/backfill.jar` - one-shot batch S3 backfill job
+- `client/target/client.jar` - example client
 
 ## Running the Applications
 
@@ -166,6 +168,16 @@ With environment variables:
 - `HTTP_NODE_URL` - URL of the Ethereum node (required)
 - `WEBSOCKET_NODE_URL` - URL of the Ethereum node websocket (required)
 - `FLIGHT_PORT` - Port for the Flight server (default: 8815)
+
+For the full env var reference covering S3 cold-archive, retention,
+restart-warm cache, and the batch backfill job — and how those settings
+interact between the server and the backfill — see
+[`configuration.md`](configuration.md).
+
+The server exposes Prometheus metrics on `METRICS_PORT` (default 9091)
+at `/metrics`. For the full metric reference (ingestion, hot cache, S3
+cold tier, subscriptions) and example PromQL alerts, see
+[`monitoring.md`](monitoring.md).
 
 **Using command line arguments:**
 

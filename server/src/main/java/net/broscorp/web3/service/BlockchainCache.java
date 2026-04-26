@@ -31,7 +31,7 @@ import org.rocksdb.WriteOptions;
 @Slf4j
 public class BlockchainCache implements AutoCloseable {
 
-    public enum Status { LOADED, PRUNED }
+    public enum Status { LOADED, PRUNED, BACKFILLING }
 
     public record CacheResult(Status status, byte[] data) {
         public static CacheResult loaded(byte[] data) {
@@ -39,6 +39,9 @@ public class BlockchainCache implements AutoCloseable {
         }
         public static CacheResult pruned() {
             return new CacheResult(Status.PRUNED, null);
+        }
+        public static CacheResult backfilling() {
+            return new CacheResult(Status.BACKFILLING, null);
         }
     }
 
@@ -50,6 +53,8 @@ public class BlockchainCache implements AutoCloseable {
         "META/lastBlock".getBytes();
     private static final byte[] META_PRUNE_FLOOR =
         "META/pruneFloor".getBytes();
+    private static final byte[] META_FORWARD_START =
+        "META/forwardStart".getBytes();
 
     private final RocksDB db;
     private final Metrics metrics;
@@ -57,6 +62,7 @@ public class BlockchainCache implements AutoCloseable {
     private final Condition blockAvailable = lock.newCondition();
     private volatile long lastIngestedBlock = -1;
     private volatile long pruneFloor = 0;
+    private volatile long forwardStart = 0;
 
     public BlockchainCache(String dbPath, Metrics metrics) throws RocksDBException {
         File dir = new File(dbPath);
@@ -69,12 +75,14 @@ public class BlockchainCache implements AutoCloseable {
         this.metrics = metrics;
         this.lastIngestedBlock = readMetaLong(META_LAST_BLOCK, -1L);
         this.pruneFloor = readMetaLong(META_PRUNE_FLOOR, 0L);
+        this.forwardStart = readMetaLong(META_FORWARD_START, this.pruneFloor);
         metrics.ingestorCommittedBlock.set(lastIngestedBlock);
         metrics.cachePruneFloor.set(pruneFloor);
         log.info(
-            "Cache initialized: lastIngestedBlock={}, pruneFloor={}",
+            "Cache initialized: lastIngestedBlock={}, pruneFloor={}, forwardStart={}",
             lastIngestedBlock,
-            pruneFloor
+            pruneFloor,
+            forwardStart
         );
     }
 
@@ -121,6 +129,34 @@ public class BlockchainCache implements AutoCloseable {
         metrics.cachePruneFloor.set(beforeBlock);
     }
 
+    /**
+     * Sets the forward-ingestion start boundary. Blocks in
+     * {@code [pruneFloor, forwardStart)} that are not yet present are reported
+     * as {@link Status#BACKFILLING} (not waited on); blocks {@code >=
+     * forwardStart} fall under the regular forward-commit invariant.
+     */
+    public void setForwardStart(long block) throws RocksDBException {
+        try (WriteOptions opts = new WriteOptions()) {
+            db.put(opts, META_FORWARD_START, encodeLong(block));
+        }
+        forwardStart = block;
+    }
+
+    /**
+     * Writes a single backfilled block out-of-order without touching
+     * {@code lastIngestedBlock}. Caller must ensure {@code pruneFloor <=
+     * blockNumber < forwardStart}.
+     */
+    public void commitBackfill(long blockNumber, byte[] blockIpc, byte[] logsIpc)
+        throws RocksDBException {
+        try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
+            batch.put(makeKey('b', blockNumber), blockIpc);
+            batch.put(makeKey('l', blockNumber), logsIpc);
+            db.write(opts, batch);
+        }
+        metrics.ingestorBlocksCommittedTotal.inc();
+    }
+
     public Optional<byte[]> getBlock(long blockNumber) throws RocksDBException {
         return Optional.ofNullable(db.get(makeKey('b', blockNumber)));
     }
@@ -158,6 +194,11 @@ public class BlockchainCache implements AutoCloseable {
             return CacheResult.loaded(data);
         }
 
+        if (blockNumber < forwardStart) {
+            metrics.cacheReadsTotal.labels(dataset, "backfilling").inc();
+            return CacheResult.backfilling();
+        }
+
         Histogram.Timer waitTimer =
             metrics.cacheWaitDurationSeconds.labels(dataset).startTimer();
         try {
@@ -182,7 +223,8 @@ public class BlockchainCache implements AutoCloseable {
                 throw new IllegalStateException(
                     "Block " + blockNumber + " missing from cache (type=" + type +
                     "); lastIngested=" + lastIngestedBlock +
-                    ", pruneFloor=" + pruneFloor
+                    ", pruneFloor=" + pruneFloor +
+                    ", forwardStart=" + forwardStart
                 );
             } finally {
                 lock.unlock();
@@ -202,6 +244,10 @@ public class BlockchainCache implements AutoCloseable {
 
     public long getPruneFloor() {
         return pruneFloor;
+    }
+
+    public long getForwardStart() {
+        return forwardStart;
     }
 
     private long readMetaLong(byte[] key, long defaultValue)

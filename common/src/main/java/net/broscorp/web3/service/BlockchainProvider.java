@@ -6,7 +6,6 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.Log;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 /**
  * Interface for fetching raw blockchain data.
@@ -15,7 +14,7 @@ public interface BlockchainProvider {
     record FullBlockData(
         EthBlock.Block block,
         List<Log> logs,
-        Map<String, TransactionReceipt> receipts
+        Map<String, ExtendedTransactionReceipt> receipts
     ) {}
 
     /**

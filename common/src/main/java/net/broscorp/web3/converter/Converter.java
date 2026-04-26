@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.service.ExtendedTransactionReceipt;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
@@ -24,7 +25,6 @@ import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.Log;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 @Slf4j
 public final class Converter {
@@ -40,6 +40,9 @@ public final class Converter {
     public static final String LOG_REMOVED = "removed";
     public static final String LOG_TIMESTAMP = "timestamp";
     public static final String LOG_TX_STATUS = "transactionStatus";
+    public static final String LOG_TX_GAS_USED = "transactionGasUsed";
+    public static final String LOG_TX_EFFECTIVE_GAS_PRICE =
+        "transactionEffectiveGasPrice";
 
     private static final Schema LOG_SCHEMA = new Schema(
         List.of(
@@ -58,7 +61,12 @@ public final class Converter {
             Field.nullable(LOG_INDEX, new ArrowType.Int(32, true)),
             Field.nullable(LOG_REMOVED, new ArrowType.Bool()),
             Field.nullable(LOG_TIMESTAMP, new ArrowType.Int(64, true)),
-            Field.nullable(LOG_TX_STATUS, new ArrowType.Int(32, true))
+            Field.nullable(LOG_TX_STATUS, new ArrowType.Int(32, true)),
+            Field.nullable(LOG_TX_GAS_USED, new ArrowType.Int(64, true)),
+            Field.nullable(
+                LOG_TX_EFFECTIVE_GAS_PRICE,
+                new ArrowType.Int(64, true)
+            )
         )
     );
 
@@ -109,7 +117,7 @@ public final class Converter {
         String blockHash,
         long timestamp,
         List<Log> logs,
-        Map<String, TransactionReceipt> receipts
+        Map<String, ExtendedTransactionReceipt> receipts
     ) {
         try (
             VectorSchemaRoot root = VectorSchemaRoot.create(
@@ -144,6 +152,10 @@ public final class Converter {
             final IntVector txStatusVector = (IntVector) root.getVector(
                 LOG_TX_STATUS
             );
+            final BigIntVector txGasUsedVector =
+                (BigIntVector) root.getVector(LOG_TX_GAS_USED);
+            final BigIntVector txEffectiveGasPriceVector =
+                (BigIntVector) root.getVector(LOG_TX_EFFECTIVE_GAS_PRICE);
 
             int rowCount = logs.isEmpty() ? 1 : logs.size();
             root.allocateNew();
@@ -173,7 +185,7 @@ public final class Converter {
                     removedVector.setSafe(i, logEntry.isRemoved() ? 1 : 0);
                     timestampVector.setSafe(i, timestamp);
 
-                    TransactionReceipt receipt = receipts.get(
+                    ExtendedTransactionReceipt receipt = receipts.get(
                         logEntry.getTransactionHash()
                     );
                     if (receipt != null) {
@@ -181,8 +193,26 @@ public final class Converter {
                             i,
                             "0x1".equals(receipt.getStatus()) ? 1 : 0
                         );
+                        if (receipt.getGasUsed() != null) {
+                            txGasUsedVector.setSafe(
+                                i,
+                                receipt.getGasUsed().longValue()
+                            );
+                        } else {
+                            txGasUsedVector.setNull(i);
+                        }
+                        if (receipt.getEffectiveGasPrice() != null) {
+                            txEffectiveGasPriceVector.setSafe(
+                                i,
+                                receipt.getEffectiveGasPrice().longValue()
+                            );
+                        } else {
+                            txEffectiveGasPriceVector.setNull(i);
+                        }
                     } else {
                         txStatusVector.setNull(i);
+                        txGasUsedVector.setNull(i);
+                        txEffectiveGasPriceVector.setNull(i);
                     }
 
                     List<String> topics = logEntry.getTopics();

@@ -22,9 +22,9 @@ import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import net.broscorp.web3.service.ExtendedTransactionReceipt;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.Log;
-import org.web3j.protocol.core.methods.response.TransactionReceipt;
 
 class ConverterTest {
 
@@ -48,9 +48,13 @@ class ConverterTest {
         throws IOException {
         // GIVEN
         Log log = createTestLog("0x111", 1L);
-        TransactionReceipt receipt = new TransactionReceipt();
+        ExtendedTransactionReceipt receipt = new ExtendedTransactionReceipt();
         receipt.setTransactionHash(log.getTransactionHash());
         receipt.setStatus("0x1"); // Success
+        receipt.setGasUsed("0x" + BigInteger.valueOf(21000).toString(16));
+        receipt.setEffectiveGasPrice(
+            "0x" + BigInteger.valueOf(20_000_000_000L).toString(16)
+        );
 
         // WHEN
         byte[] ipcBytes = converter.toLogIpcBytes(
@@ -77,6 +81,9 @@ class ConverterTest {
             assertThat(getLong(root, "blockNumber", 0)).isEqualTo(1L);
             assertThat(getLong(root, "timestamp", 0)).isEqualTo(123456789L);
             assertThat(getInt(root, "transactionStatus", 0)).isEqualTo(1);
+            assertThat(getLong(root, "transactionGasUsed", 0)).isEqualTo(21000L);
+            assertThat(getLong(root, "transactionEffectiveGasPrice", 0))
+                .isEqualTo(20_000_000_000L);
 
             List<Object> topics = (List<Object>) (
                 (ListVector) root.getVector("topics")

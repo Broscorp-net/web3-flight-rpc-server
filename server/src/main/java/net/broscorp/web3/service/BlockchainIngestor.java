@@ -3,22 +3,29 @@ package net.broscorp.web3.service;
 import java.math.BigInteger;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import io.prometheus.client.Histogram;
+import io.reactivex.disposables.Disposable;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.archive.ArchiveKey;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
 import net.broscorp.web3.service.BlockchainProvider.FullBlockData;
 import org.apache.arrow.memory.BufferAllocator;
+import org.rocksdb.RocksDBException;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.websocket.WebSocketService;
 
 /**
  * Drives ingestion of full blocks into {@link BlockchainCache} with strict
@@ -41,14 +48,19 @@ import org.web3j.protocol.Web3j;
 @Slf4j
 public class BlockchainIngestor implements AutoCloseable {
 
-    public static final int DEFAULT_MAX_INFLIGHT = 16;
-    public static final long ARCHIVE_CHUNK_SIZE = 1000;
+    public static final int DEFAULT_MAX_INFLIGHT = 5;
+    public static final long DEFAULT_BACKFILL_BLOCKS = 0L;
+
+    private static final long WATCHDOG_INTERVAL_SECONDS = 10;
+    private static final long HEAD_STALE_THRESHOLD_NANOS =
+        TimeUnit.SECONDS.toNanos(30);
 
     private final BlockchainProvider provider;
     private final BlockchainCache cache;
     private final Converter converter;
     private final BufferAllocator allocator;
     private final Web3j web3jWebSocket;
+    private final WebSocketService wss;
     private final Metrics metrics;
     private final int maxInflight;
 
@@ -65,12 +77,27 @@ public class BlockchainIngestor implements AutoCloseable {
         Executors.newSingleThreadExecutor(r ->
             newNamedDaemon(r, "ingestor-archive")
         );
+    private final ExecutorService backfillExecutor =
+        Executors.newSingleThreadExecutor(r ->
+            newNamedDaemon(r, "ingestor-backfill")
+        );
+    private final ScheduledExecutorService watchdogExecutor =
+        Executors.newSingleThreadScheduledExecutor(r ->
+            newNamedDaemon(r, "ingestor-ws-watchdog")
+        );
+    private final ExecutorService reconnectExecutor =
+        Executors.newSingleThreadExecutor(r ->
+            newNamedDaemon(r, "ingestor-ws-reconnect")
+        );
 
     private final Lock pendingLock = new ReentrantLock();
     private final Condition pendingReady = pendingLock.newCondition();
     private final TreeMap<Long, FullBlockData> pending = new TreeMap<>();
 
     private final AtomicLong headBlock = new AtomicLong(-1);
+    private final AtomicLong lastHeadProgressNanos = new AtomicLong(0);
+    private final AtomicBoolean reconnectInFlight = new AtomicBoolean(false);
+    private volatile Disposable headSubscription;
 
     private Long retentionBlocks;
     private ArchiveManager archiveManager;
@@ -82,6 +109,7 @@ public class BlockchainIngestor implements AutoCloseable {
         Converter converter,
         BufferAllocator allocator,
         Web3j web3jWebSocket,
+        WebSocketService wss,
         Metrics metrics
     ) {
         this(
@@ -90,6 +118,7 @@ public class BlockchainIngestor implements AutoCloseable {
             converter,
             allocator,
             web3jWebSocket,
+            wss,
             metrics,
             DEFAULT_MAX_INFLIGHT
         );
@@ -101,6 +130,7 @@ public class BlockchainIngestor implements AutoCloseable {
         Converter converter,
         BufferAllocator allocator,
         Web3j web3jWebSocket,
+        WebSocketService wss,
         Metrics metrics,
         int maxInflight
     ) {
@@ -109,6 +139,7 @@ public class BlockchainIngestor implements AutoCloseable {
         this.converter = converter;
         this.allocator = allocator;
         this.web3jWebSocket = web3jWebSocket;
+        this.wss = wss;
         this.metrics = metrics;
         this.maxInflight = maxInflight;
         this.fetchPool = Executors.newFixedThreadPool(maxInflight, r ->
@@ -120,15 +151,26 @@ public class BlockchainIngestor implements AutoCloseable {
         Long initialBlock,
         Long retentionBlocks,
         ArchiveManager archiveManager
-    ) {
+    ) throws RocksDBException {
+        start(initialBlock, retentionBlocks, archiveManager, DEFAULT_BACKFILL_BLOCKS);
+    }
+
+    public void start(
+        Long initialBlock,
+        Long retentionBlocks,
+        ArchiveManager archiveManager,
+        long backfillBlocks
+    ) throws RocksDBException {
         this.retentionBlocks = retentionBlocks;
         this.archiveManager = archiveManager;
-        this.archiveDispatchedUpTo = cache.getPruneFloor();
 
+        boolean freshCache = cache.getLastIngestedBlock() < 0;
         long resumeFrom = cache.getLastIngestedBlock() + 1;
         long startFrom;
-        if (cache.getLastIngestedBlock() < 0 && initialBlock != null) {
-            startFrom = initialBlock;
+        if (freshCache) {
+            startFrom = (initialBlock != null)
+                ? initialBlock
+                : fetchLatestBlockBlocking();
         } else {
             startFrom = resumeFrom;
             if (initialBlock != null && initialBlock != resumeFrom) {
@@ -140,17 +182,78 @@ public class BlockchainIngestor implements AutoCloseable {
             }
         }
 
+        // Backfill window and floors are only configured on a fresh cache; on
+        // warm restart we preserve the persisted pruneFloor / forwardStart so
+        // already-backfilled blocks stay available and we don't accidentally
+        // wipe the contiguous-committed range.
+        long backfillFloor = startFrom;
+        if (freshCache) {
+            if (backfillBlocks > 0) {
+                backfillFloor = Math.max(0L, startFrom - backfillBlocks);
+            }
+            if (backfillFloor > cache.getPruneFloor()) {
+                cache.prune(backfillFloor);
+            }
+            cache.setForwardStart(startFrom);
+        }
+        this.archiveDispatchedUpTo = cache.getPruneFloor();
+
         log.info(
-            "Starting ingestion from block {} (retention={}, archiving={}, maxInflight={})",
+            "Starting ingestion from block {} (retention={}, archiving={}, maxInflight={}, backfill=[{}, {}))",
             startFrom,
             retentionBlocks,
             archiveManager != null,
-            maxInflight
+            maxInflight,
+            backfillFloor,
+            startFrom
         );
 
+        lastHeadProgressNanos.set(System.nanoTime());
         subscribeToHead();
+        watchdogExecutor.scheduleAtFixedRate(
+            this::watchdogTick,
+            WATCHDOG_INTERVAL_SECONDS,
+            WATCHDOG_INTERVAL_SECONDS,
+            TimeUnit.SECONDS
+        );
         dispatcherExecutor.submit(() -> dispatchLoop(startFrom));
         committerExecutor.submit(() -> commitLoop(startFrom));
+        if (freshCache && backfillFloor < startFrom) {
+            final long from = startFrom - 1;
+            final long to = backfillFloor;
+            backfillExecutor.submit(() -> backfillLoop(from, to));
+        }
+    }
+
+    private long fetchLatestBlockBlocking() {
+        while (true) {
+            try {
+                long latest = provider
+                    .getLatestBlockNumber()
+                    .get(10, TimeUnit.SECONDS)
+                    .longValue();
+                log.info("Fresh cache: starting from current head block {}", latest);
+                return latest;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(
+                    "Interrupted while resolving start block", e
+                );
+            } catch (Exception e) {
+                log.warn(
+                    "Failed to query latest block; retrying in 1s: {}",
+                    e.toString()
+                );
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(
+                        "Interrupted while resolving start block", ie
+                    );
+                }
+            }
+        }
     }
 
     private void subscribeToHead() {
@@ -158,7 +261,11 @@ public class BlockchainIngestor implements AutoCloseable {
         // blockFlowable(), which sets up an HTTP-style eth_newBlockFilter poll
         // and triggers a QUANTITY encoding incompatibility with some nodes
         // (notably Hardhat rejecting "0x01" as a filter id).
-        web3jWebSocket
+        Disposable old = headSubscription;
+        if (old != null && !old.isDisposed()) {
+            old.dispose();
+        }
+        headSubscription = web3jWebSocket
             .newHeadsNotifications()
             .subscribe(
                 notif -> {
@@ -168,9 +275,66 @@ public class BlockchainIngestor implements AutoCloseable {
                     long updated =
                         headBlock.accumulateAndGet(newHead, Math::max);
                     metrics.ingestorHeadBlock.set(updated);
+                    lastHeadProgressNanos.set(System.nanoTime());
                 },
-                err -> log.error("Error in newHeads subscription", err)
+                err -> {
+                    log.warn(
+                        "newHeads subscription errored ({}); scheduling WS reconnect",
+                        err.toString()
+                    );
+                    scheduleReconnect();
+                },
+                () -> {
+                    log.warn("newHeads subscription completed; scheduling WS reconnect");
+                    scheduleReconnect();
+                }
             );
+    }
+
+    private void scheduleReconnect() {
+        if (wss == null) return;
+        if (!reconnectInFlight.compareAndSet(false, true)) return;
+        reconnectExecutor.submit(() -> {
+            try {
+                attemptReconnect();
+            } finally {
+                reconnectInFlight.set(false);
+            }
+        });
+    }
+
+    private void attemptReconnect() {
+        try {
+            wss.connect();
+            subscribeToHead();
+            lastHeadProgressNanos.set(System.nanoTime());
+            log.info("WS reconnect succeeded");
+        } catch (Exception e) {
+            log.warn("WS reconnect failed: {}", e.toString());
+        }
+    }
+
+    private void watchdogTick() {
+        long last = lastHeadProgressNanos.get();
+        if (last == 0) return;
+        long stale = System.nanoTime() - last;
+        if (stale < HEAD_STALE_THRESHOLD_NANOS) return;
+        log.warn(
+            "headBlock has not advanced for {}s; HTTP-polling and reconnecting WS",
+            TimeUnit.NANOSECONDS.toSeconds(stale)
+        );
+        try {
+            long latest = provider
+                .getLatestBlockNumber()
+                .get(10, TimeUnit.SECONDS)
+                .longValue();
+            long updated = headBlock.accumulateAndGet(latest, Math::max);
+            metrics.ingestorHeadBlock.set(updated);
+            lastHeadProgressNanos.set(System.nanoTime());
+        } catch (Exception e) {
+            log.warn("HTTP head poll failed: {}", e.toString());
+        }
+        scheduleReconnect();
     }
 
     private void dispatchLoop(long startFrom) {
@@ -325,13 +489,68 @@ public class BlockchainIngestor implements AutoCloseable {
         if (retentionBlocks == null) return;
         while (
             committedBlock >=
-            archiveDispatchedUpTo + ARCHIVE_CHUNK_SIZE + retentionBlocks
+            archiveDispatchedUpTo + ArchiveKey.CHUNK_SIZE + retentionBlocks
         ) {
             final long start = archiveDispatchedUpTo;
-            final long end = start + ARCHIVE_CHUNK_SIZE;
+            final long end = start + ArchiveKey.CHUNK_SIZE;
             archiveExecutor.submit(() -> runArchiveAndPrune(start, end));
             archiveDispatchedUpTo = end;
         }
+    }
+
+    private void backfillLoop(long fromInclusive, long toInclusive) {
+        log.info("Backfill starting: range [{}, {}]", toInclusive, fromInclusive);
+        try {
+            for (long n = fromInclusive; n >= toInclusive; n--) {
+                if (Thread.currentThread().isInterrupted()) return;
+                try {
+                    if (tryBackfillFromArchive(n)) continue;
+                    backfillFromRpc(n);
+                } catch (InterruptedException e) {
+                    throw e;
+                } catch (Exception e) {
+                    log.error("Backfill failed for block {}; skipping", n, e);
+                }
+            }
+            log.info("Backfill complete: range [{}, {}]", toInclusive, fromInclusive);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.info("Backfill interrupted");
+        }
+    }
+
+    private boolean tryBackfillFromArchive(long n) throws Exception {
+        if (archiveManager == null) return false;
+        byte[] blockIpc;
+        byte[] logsIpc;
+        try {
+            CompletableFuture<byte[]> blockFuture =
+                archiveManager.getFromArchive(ArchiveManager.DATASET_BLOCKS, n);
+            CompletableFuture<byte[]> logsFuture =
+                archiveManager.getFromArchive(ArchiveManager.DATASET_LOGS, n);
+            blockIpc = blockFuture.get();
+            logsIpc = logsFuture.get();
+        } catch (Exception e) {
+            log.warn("Backfill archive lookup failed for block {}; falling back to RPC: {}", n, e.toString());
+            return false;
+        }
+        if (blockIpc == null || logsIpc == null) return false;
+        cache.commitBackfill(n, blockIpc, logsIpc);
+        return true;
+    }
+
+    private void backfillFromRpc(long n) throws Exception {
+        FullBlockData data = fetchWithRetry(n);
+        byte[] blockIpc = converter.toBlockIpcBytes(allocator, data.block());
+        byte[] logsIpc = converter.toLogIpcBytes(
+            allocator,
+            n,
+            data.block().getHash(),
+            data.block().getTimestamp().longValue(),
+            data.logs(),
+            data.receipts()
+        );
+        cache.commitBackfill(n, blockIpc, logsIpc);
     }
 
     private void runArchiveAndPrune(long start, long end) {
@@ -341,12 +560,30 @@ public class BlockchainIngestor implements AutoCloseable {
             }
             cache.prune(end);
             log.info("Archive+prune complete for [{}, {})", start, end);
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            // Unwrap CompletionException so OOMs (and other Errors) bubbling
+            // out of the s3-archive executor are detected.
+            Throwable root = t;
+            while (root.getCause() != null && root.getCause() != root) {
+                root = root.getCause();
+            }
+            if (root instanceof OutOfMemoryError) {
+                log.error(
+                    "OutOfMemoryError during archive of [{}, {}); halting JVM "
+                        + "for orchestrator restart",
+                    start,
+                    end,
+                    root
+                );
+                // halt() skips shutdown hooks — they may also OOM.
+                Runtime.getRuntime().halt(137);
+                return;
+            }
             log.error(
                 "Archive/prune failed for [{}, {}); data remains in cache",
                 start,
                 end,
-                e
+                t
             );
         }
     }
@@ -359,8 +596,13 @@ public class BlockchainIngestor implements AutoCloseable {
 
     @Override
     public void close() {
+        watchdogExecutor.shutdownNow();
+        reconnectExecutor.shutdownNow();
+        Disposable sub = headSubscription;
+        if (sub != null && !sub.isDisposed()) sub.dispose();
         dispatcherExecutor.shutdownNow();
         committerExecutor.shutdownNow();
+        backfillExecutor.shutdownNow();
         archiveExecutor.shutdown();
         fetchPool.shutdownNow();
         try {

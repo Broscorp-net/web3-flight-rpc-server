@@ -75,7 +75,7 @@ class BlockchainIngestorTest {
         };
 
         BlockchainIngestor ingestor = new BlockchainIngestor(
-            provider, cache, converter, allocator, web3jMock, metrics, 8
+            provider, cache, converter, allocator, web3jMock, null, metrics, 8
         );
         ingestor.start(0L, null, null);
 

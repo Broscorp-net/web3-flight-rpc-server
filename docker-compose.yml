@@ -25,6 +25,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: web3-flight-server
+    command: server.jar
     ports:
       - "8815:8815"
       - "9091:9091"
@@ -42,6 +43,11 @@ services:
       # RETENTION_BLOCKS: unset -> keep forever (dev default).
       # In prod, set to a multiple of 1000, e.g. 100000 (~2 weeks of L1 blocks).
       # - RETENTION_BLOCKS=100000
+      # BACKFILL_BLOCKS: on a fresh cache only, also fetch the previous N blocks
+      # backward from the start head into the hot cache. 0 (default) disables.
+      # If S3 is configured, the backfill loop pulls each block from S3 first
+      # and falls back to RPC on miss.
+      # - BACKFILL_BLOCKS=1000
       # --- Cold tier (S3) ---
       # ARCHIVE_MODE: off|optional|required
       #   off      - no S3 writes; pruned data is lost permanently (dev).

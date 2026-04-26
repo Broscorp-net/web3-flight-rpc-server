@@ -7,10 +7,10 @@
         <version>0.0.1-SNAPSHOT</version>
     </parent>
 
-    <artifactId>server</artifactId>
+    <artifactId>backfill</artifactId>
     <packaging>jar</packaging>
 
-    <name>server</name>
+    <name>backfill</name>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -41,13 +41,11 @@
                             <transformers>
                                 <transformer
                                         implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>net.broscorp.web3.server.FlightRpcServer</mainClass>
+                                    <mainClass>net.broscorp.web3.backfill.BackfillRunner</mainClass>
                                 </transformer>
-                                <!--needed to properly merge configs for grpc dependency jars https://github.com/grpc/grpc-java/issues/5493#issuecomment-478500418-->
                                 <transformer
                                         implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
-                            <!--signatures break because of shading https://stackoverflow.com/questions/34855649/invalid-signature-file-digest-for-manifest-main-attributes-exception-while-tryin-->
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>
