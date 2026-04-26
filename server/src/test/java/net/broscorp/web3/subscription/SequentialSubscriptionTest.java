@@ -1,9 +1,11 @@
 package net.broscorp.web3.subscription;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigInteger;
@@ -13,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
+import net.broscorp.web3.archive.ArchiveKey;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.dto.request.LogsRequest;
 import net.broscorp.web3.metrics.Metrics;
@@ -153,8 +156,12 @@ class SequentialSubscriptionTest {
 
         when(cache.getLogsOrWait(5L)).thenReturn(CacheResult.pruned());
         ArchiveManager archive = mock(ArchiveManager.class);
-        when(archive.getFromArchive(ArchiveManager.DATASET_LOGS, 5L))
-            .thenReturn(CompletableFuture.completedFuture(archivedLogs));
+        ArchiveManager.ChunkReader reader = mock(ArchiveManager.ChunkReader.class);
+        long chunkStart = ArchiveKey.chunkStartFor(5L);
+        when(reader.chunkStart()).thenReturn(chunkStart);
+        when(reader.readBlock(5L)).thenReturn(archivedLogs);
+        when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, chunkStart))
+            .thenReturn(CompletableFuture.completedFuture(reader));
 
         VectorSchemaRoot root = VectorSchemaRoot.create(
             converter.getLogSchema(), allocator
@@ -168,5 +175,51 @@ class SequentialSubscriptionTest {
         Thread.sleep(500);
 
         assertThat(lf.putNextCalls().get()).isEqualTo(1);
+    }
+
+    @Test
+    void prunedConsecutive_opensChunkReaderOnce() throws Exception {
+        long chunkStart = ArchiveKey.chunkStartFor(5L);
+        long block1 = chunkStart + 5;
+        long block2 = chunkStart + 6;
+
+        LogsRequest request = new LogsRequest();
+        request.setStartBlock(BigInteger.valueOf(block1));
+        request.setEndBlock(BigInteger.valueOf(block2));
+
+        when(cache.getLogsOrWait(block1)).thenReturn(CacheResult.pruned());
+        when(cache.getLogsOrWait(block2)).thenReturn(CacheResult.pruned());
+
+        byte[] payload = converter.toLogIpcBytes(
+            allocator, 0L, "h", 0L, Collections.emptyList(), Collections.emptyMap()
+        );
+
+        ArchiveManager archive = mock(ArchiveManager.class);
+        ArchiveManager.ChunkReader reader = mock(ArchiveManager.ChunkReader.class);
+        when(reader.chunkStart()).thenReturn(chunkStart);
+        when(reader.readBlock(block1)).thenReturn(payload);
+        when(reader.readBlock(block2)).thenReturn(payload);
+        when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, chunkStart))
+            .thenReturn(CompletableFuture.completedFuture(reader));
+
+        VectorSchemaRoot root = VectorSchemaRoot.create(
+            converter.getLogSchema(), allocator
+        );
+        ListenerFixture lf = listenerFor(root);
+        SequentialLogSubscription sub = new SequentialLogSubscription(
+            lf.listener(), root, allocator, request, cache, archive, executor, metrics
+        );
+
+        sub.start();
+        Thread.sleep(500);
+
+        assertThat(lf.putNextCalls().get()).isEqualTo(2);
+        // Two pruned reads from the same chunk should result in exactly ONE
+        // S3 download, not two.
+        verify(archive, times(1)).openChunkReader(
+            eq(ArchiveManager.DATASET_LOGS), eq(chunkStart)
+        );
+        // Reader is closed when the subscription terminates.
+        verify(reader).close();
     }
 }

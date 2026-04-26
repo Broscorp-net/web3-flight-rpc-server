@@ -1,7 +1,7 @@
 package net.broscorp.web3.service;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -123,42 +123,47 @@ public class S3ArchiveManager implements ArchiveManager {
     }
 
     @Override
-    public CompletableFuture<byte[]> getFromArchive(
+    public CompletableFuture<ChunkReader> openChunkReader(
         String dataset,
-        long blockNumber
+        long chunkStart
     ) {
         return CompletableFuture.supplyAsync(
             () -> {
                 Histogram.Timer timer =
                     metrics.archiveColdReadDurationSeconds.startTimer();
-                long chunkStart = ArchiveKey.chunkStartFor(blockNumber);
                 long chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
                 String key = ArchiveKey.objectKey(keyPrefix, dataset, chunkStart, chunkEnd);
+                Path tmp;
                 try {
-                    byte[] object;
+                    tmp = Files.createTempFile("cold-" + dataset + "-", ".arrow");
+                } catch (Exception e) {
+                    timer.observeDuration();
+                    metrics.archiveColdReadsTotal.labels(dataset, "failure").inc();
+                    throw new RuntimeException(
+                        "Failed to create cold-read temp file for " + key, e
+                    );
+                }
+                try {
                     try {
-                        object = s3
-                            .getObjectAsBytes(
-                                GetObjectRequest.builder()
-                                    .bucket(bucket)
-                                    .key(key)
-                                    .build()
-                            )
-                            .asByteArray();
+                        s3.getObject(
+                            GetObjectRequest.builder()
+                                .bucket(bucket)
+                                .key(key)
+                                .build(),
+                            tmp
+                        );
                     } catch (NoSuchKeyException e) {
                         metrics.archiveColdReadsTotal.labels(dataset, "miss").inc();
                         log.debug("Archive object {} not found", key);
+                        deleteQuietly(tmp);
                         return null;
                     }
-                    byte[] extracted = extractBatch(object, blockNumber - chunkStart);
-                    String status = extracted == null ? "miss" : "hit";
-                    metrics.archiveColdReadsTotal.labels(dataset, status).inc();
-                    return extracted;
+                    return new S3ChunkReader(allocator, dataset, chunkStart, tmp, metrics);
                 } catch (Exception e) {
+                    deleteQuietly(tmp);
                     metrics.archiveColdReadsTotal.labels(dataset, "failure").inc();
                     throw new RuntimeException(
-                        "Failed to extract block " + blockNumber + " from " + key,
-                        e
+                        "Failed to open chunk reader for " + key, e
                     );
                 } finally {
                     timer.observeDuration();
@@ -166,6 +171,14 @@ public class S3ArchiveManager implements ArchiveManager {
             },
             executor
         );
+    }
+
+    private static void deleteQuietly(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (Exception e) {
+            log.warn("Failed to delete cold-read temp file {}", file, e);
+        }
     }
 
     private interface CacheLookup {
@@ -221,37 +234,110 @@ public class S3ArchiveManager implements ArchiveManager {
         }
     }
 
-    private byte[] extractBatch(byte[] streamBytes, long batchIndex)
-        throws Exception {
-        try (
-            ArrowStreamReader reader = new ArrowStreamReader(
-                new ByteArrayInputStream(streamBytes),
-                allocator
-            )
-        ) {
-            for (long i = 0; i <= batchIndex; i++) {
+    public void close() {
+        executor.shutdown();
+    }
+
+    /**
+     * Forward-only cursor over a single chunk file. State machine:
+     * {@code nextBatchIndex} is the index of the batch that the next
+     * {@link ArrowStreamReader#loadNextBatch} call would load. {@link #readBlock}
+     * is required to be called with strictly increasing block numbers; the
+     * reader advances the underlying stream until the requested batch is loaded
+     * and then returns it serialized as single-batch IPC bytes.
+     */
+    private static class S3ChunkReader implements ChunkReader {
+
+        private final String dataset;
+        private final long chunkStart;
+        private final long chunkEnd;
+        private final Path file;
+        private final InputStream in;
+        private final ArrowStreamReader reader;
+        private final Metrics metrics;
+        private long nextBatchIndex;
+
+        S3ChunkReader(
+            BufferAllocator allocator,
+            String dataset,
+            long chunkStart,
+            Path file,
+            Metrics metrics
+        ) throws Exception {
+            this.dataset = dataset;
+            this.chunkStart = chunkStart;
+            this.chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
+            this.file = file;
+            this.metrics = metrics;
+            this.in = Files.newInputStream(file);
+            try {
+                this.reader = new ArrowStreamReader(in, allocator);
+            } catch (Exception e) {
+                in.close();
+                throw e;
+            }
+        }
+
+        @Override
+        public long chunkStart() {
+            return chunkStart;
+        }
+
+        @Override
+        public long chunkEnd() {
+            return chunkEnd;
+        }
+
+        @Override
+        public byte[] readBlock(long blockNumber) throws Exception {
+            if (blockNumber < chunkStart || blockNumber >= chunkEnd) {
+                throw new IllegalArgumentException(
+                    "Block " + blockNumber + " is outside chunk ["
+                        + chunkStart + ", " + chunkEnd + ")"
+                );
+            }
+            long targetIndex = blockNumber - chunkStart;
+            if (targetIndex < nextBatchIndex) {
+                throw new IllegalArgumentException(
+                    "Out-of-order chunk read: blockNumber=" + blockNumber
+                        + " is before the cursor for chunk starting at " + chunkStart
+                );
+            }
+            while (nextBatchIndex <= targetIndex) {
                 if (!reader.loadNextBatch()) {
+                    metrics.archiveColdReadsTotal.labels(dataset, "miss").inc();
                     return null;
                 }
+                nextBatchIndex++;
             }
             VectorSchemaRoot root = reader.getVectorSchemaRoot();
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             try (
                 ArrowStreamWriter writer = new ArrowStreamWriter(
-                    root,
-                    null,
-                    Channels.newChannel(out)
+                    root, null, Channels.newChannel(out)
                 )
             ) {
                 writer.start();
                 writer.writeBatch();
                 writer.end();
             }
+            metrics.archiveColdReadsTotal.labels(dataset, "hit").inc();
             return out.toByteArray();
         }
-    }
 
-    public void close() {
-        executor.shutdown();
+        @Override
+        public void close() {
+            try {
+                reader.close();
+            } catch (Exception e) {
+                log.warn("Failed to close ArrowStreamReader for {}", file, e);
+            }
+            try {
+                in.close();
+            } catch (Exception e) {
+                log.warn("Failed to close InputStream for {}", file, e);
+            }
+            deleteQuietly(file);
+        }
     }
 }

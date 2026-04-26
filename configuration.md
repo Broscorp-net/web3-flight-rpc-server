@@ -123,6 +123,35 @@ will resume from the persistent RocksDB cache and try the same chunk
 again with a fresh heap. Make sure the temp dir isn't on a tiny
 ephemeral overlay if you're running in a container.
 
+### Memory + disk during cold-tier reads
+
+Cold-tier reads (subscriptions hitting blocks below `pruneFloor`) use
+the same disk-backed pattern: the chunk object is streamed from S3
+directly to a temp file under `java.io.tmpdir`, then a forward-only
+cursor (`ArchiveManager.ChunkReader`) walks the chunk's Arrow IPC
+batches as the subscription consumes blocks. Each subscription holds at
+most one open chunk reader at a time and downloads each chunk **once**;
+consecutive in-chunk reads reuse the same temp file. The reader (and
+its temp file) is closed when the subscription crosses a chunk boundary,
+transitions back to the hot cache, or terminates.
+
+Per active subscription in a cold segment:
+
+- one chunk file under `java.io.tmpdir` (typically 50–200 MB), deleted
+  on chunk-boundary crossing or subscription close;
+- one Arrow batch's vectors in heap at extraction time.
+
+The backward backfill loop (fresh-cache `BACKFILL_BLOCKS` warmup) uses
+the same per-chunk reader pattern: each chunk is opened once, all
+in-range blocks within it are committed to RocksDB before moving to the
+next chunk down. If a chunk is missing from S3 or has gaps, the loop
+falls back to RPC for the affected blocks.
+
+Cold reads and archive writes share one `s3-archive` thread; many
+concurrent cold subscriptions queue against each other (and against
+archive sweeps). Splitting these into separate executor pools is
+tracked as a follow-up.
+
 ### JVM
 
 | Var | Default | Purpose |

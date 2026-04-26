@@ -85,7 +85,7 @@ unless noted otherwise.
 | `flight_archive_uploads_total` | Counter | `status` (`success`\|`failure`) | Outcome of each archive sweep (one chunk = blocks + logs uploaded together). |
 | `flight_archive_cold_reads_total` | Counter | `dataset` (`blocks`\|`logs`), `status` (`hit`\|`miss`\|`failure`) | Cold-tier reads from S3, by dataset and outcome. |
 | `flight_archive_upload_duration_seconds` | Histogram, custom buckets `[0.1, 0.5, 1, 5, 10, 30, 60, 120]` s | — | Wall time to archive + upload one chunk's blocks and logs. |
-| `flight_archive_cold_read_duration_seconds` | Histogram | — | Wall time to fetch a single block from S3 (downloads the chunk, extracts the row). |
+| `flight_archive_cold_read_duration_seconds` | Histogram | — | Wall time to **open a cold chunk** (S3 download to temp file). Per-block reads after open are local file reads and not separately measured; this metric paces cold-tier responsiveness. |
 
 ### Subscriptions (Flight clients)
 

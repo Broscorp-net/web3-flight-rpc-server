@@ -3,7 +3,6 @@ package net.broscorp.web3.service;
 import java.math.BigInteger;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -501,16 +500,13 @@ public class BlockchainIngestor implements AutoCloseable {
     private void backfillLoop(long fromInclusive, long toInclusive) {
         log.info("Backfill starting: range [{}, {}]", toInclusive, fromInclusive);
         try {
-            for (long n = fromInclusive; n >= toInclusive; n--) {
+            long n = fromInclusive;
+            while (n >= toInclusive) {
                 if (Thread.currentThread().isInterrupted()) return;
-                try {
-                    if (tryBackfillFromArchive(n)) continue;
-                    backfillFromRpc(n);
-                } catch (InterruptedException e) {
-                    throw e;
-                } catch (Exception e) {
-                    log.error("Backfill failed for block {}; skipping", n, e);
-                }
+                long chunkStart = ArchiveKey.chunkStartFor(n);
+                long firstInChunk = Math.max(toInclusive, chunkStart);
+                backfillChunk(chunkStart, firstInChunk, n);
+                n = chunkStart - 1;
             }
             log.info("Backfill complete: range [{}, {}]", toInclusive, fromInclusive);
         } catch (InterruptedException e) {
@@ -519,24 +515,81 @@ public class BlockchainIngestor implements AutoCloseable {
         }
     }
 
-    private boolean tryBackfillFromArchive(long n) throws Exception {
-        if (archiveManager == null) return false;
-        byte[] blockIpc;
-        byte[] logsIpc;
-        try {
-            CompletableFuture<byte[]> blockFuture =
-                archiveManager.getFromArchive(ArchiveManager.DATASET_BLOCKS, n);
-            CompletableFuture<byte[]> logsFuture =
-                archiveManager.getFromArchive(ArchiveManager.DATASET_LOGS, n);
-            blockIpc = blockFuture.get();
-            logsIpc = logsFuture.get();
-        } catch (Exception e) {
-            log.warn("Backfill archive lookup failed for block {}; falling back to RPC: {}", n, e.toString());
-            return false;
+    /**
+     * Backfills {@code [firstBlock, lastBlock]} (both inclusive, all in the
+     * chunk starting at {@code chunkStart}) into the cache. Opens the chunk's
+     * archive readers once; falls back to RPC per block on any open failure
+     * or any in-chunk gap.
+     */
+    private void backfillChunk(long chunkStart, long firstBlock, long lastBlock)
+        throws InterruptedException {
+        ArchiveManager.ChunkReader blocksReader = null;
+        ArchiveManager.ChunkReader logsReader = null;
+        if (archiveManager != null) {
+            try {
+                blocksReader = archiveManager
+                    .openChunkReader(ArchiveManager.DATASET_BLOCKS, chunkStart)
+                    .get();
+                logsReader = archiveManager
+                    .openChunkReader(ArchiveManager.DATASET_LOGS, chunkStart)
+                    .get();
+                if (blocksReader == null || logsReader == null) {
+                    closeQuietly(blocksReader);
+                    closeQuietly(logsReader);
+                    blocksReader = null;
+                    logsReader = null;
+                }
+            } catch (InterruptedException e) {
+                closeQuietly(blocksReader);
+                closeQuietly(logsReader);
+                throw e;
+            } catch (Exception e) {
+                log.warn(
+                    "Archive open failed for chunk [{}, {}); falling back to RPC: {}",
+                    chunkStart,
+                    chunkStart + ArchiveKey.CHUNK_SIZE,
+                    e.toString()
+                );
+                closeQuietly(blocksReader);
+                closeQuietly(logsReader);
+                blocksReader = null;
+                logsReader = null;
+            }
         }
-        if (blockIpc == null || logsIpc == null) return false;
-        cache.commitBackfill(n, blockIpc, logsIpc);
-        return true;
+
+        try {
+            for (long n = firstBlock; n <= lastBlock; n++) {
+                if (Thread.currentThread().isInterrupted()) return;
+                try {
+                    if (blocksReader != null && logsReader != null) {
+                        byte[] blockIpc = blocksReader.readBlock(n);
+                        byte[] logsIpc = logsReader.readBlock(n);
+                        if (blockIpc != null && logsIpc != null) {
+                            cache.commitBackfill(n, blockIpc, logsIpc);
+                            continue;
+                        }
+                        log.warn(
+                            "Archive chunk [{}, {}) missing block {}; falling back to RPC",
+                            chunkStart,
+                            chunkStart + ArchiveKey.CHUNK_SIZE,
+                            n
+                        );
+                    }
+                    backfillFromRpc(n);
+                } catch (InterruptedException e) {
+                    throw e;
+                } catch (Exception e) {
+                    log.error("Backfill failed for block {}; skipping", n, e);
+                }
+            }
+        } finally {
+            closeQuietly(blocksReader);
+            closeQuietly(logsReader);
+        }
+    }
+
+    private static void closeQuietly(ArchiveManager.ChunkReader r) {
+        if (r != null) r.close();
     }
 
     private void backfillFromRpc(long n) throws Exception {

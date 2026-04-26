@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.archive.ArchiveKey;
 import net.broscorp.web3.dto.request.ClientRequest;
 import net.broscorp.web3.metrics.Metrics;
 import net.broscorp.web3.service.ArchiveManager;
@@ -31,6 +32,7 @@ public abstract class SequentialSubscription<
     protected final ExecutorService executor;
     protected final Metrics metrics;
     private final AtomicBoolean isTerminated = new AtomicBoolean(false);
+    private ArchiveManager.ChunkReader currentChunkReader;
 
     protected SequentialSubscription(
         FlightProducer.ServerStreamListener listener,
@@ -119,9 +121,15 @@ public abstract class SequentialSubscription<
     private byte[] fetchIpcBytes(long blockNumber) throws Exception {
         CacheResult r = getFromCache(blockNumber);
         return switch (r.status()) {
-            case LOADED -> r.data();
+            case LOADED -> {
+                closeChunkReader();
+                yield r.data();
+            }
             case PRUNED -> fetchFromArchive(blockNumber);
-            case BACKFILLING -> throw new BackfillPendingException(blockNumber);
+            case BACKFILLING -> {
+                closeChunkReader();
+                throw new BackfillPendingException(blockNumber);
+            }
         };
     }
 
@@ -131,14 +139,34 @@ public abstract class SequentialSubscription<
                 "Block " + blockNumber + " is pruned and no archive is configured"
             );
         }
-        byte[] data = archive.getFromArchive(datasetName(), blockNumber).get();
+        long chunkStart = ArchiveKey.chunkStartFor(blockNumber);
+        if (currentChunkReader == null || currentChunkReader.chunkStart() != chunkStart) {
+            closeChunkReader();
+            currentChunkReader =
+                archive.openChunkReader(datasetName(), chunkStart).get();
+            if (currentChunkReader == null) {
+                throw new IllegalStateException(
+                    "Block " + blockNumber + " is pruned but archive chunk ["
+                        + chunkStart + ", " + (chunkStart + ArchiveKey.CHUNK_SIZE)
+                        + ") does not exist (dataset=" + datasetName() + ")"
+                );
+            }
+        }
+        byte[] data = currentChunkReader.readBlock(blockNumber);
         if (data == null) {
             throw new IllegalStateException(
                 "Block " + blockNumber +
-                " not present in archive (dataset=" + datasetName() + ")"
+                " not present in archive chunk (dataset=" + datasetName() + ")"
             );
         }
         return data;
+    }
+
+    private void closeChunkReader() {
+        if (currentChunkReader != null) {
+            currentChunkReader.close();
+            currentChunkReader = null;
+        }
     }
 
     protected abstract CacheResult getFromCache(long blockNumber)
@@ -164,6 +192,7 @@ public abstract class SequentialSubscription<
     @Override
     public void close() throws Exception {
         if (isTerminated.compareAndSet(false, true)) {
+            closeChunkReader();
             metrics.subscriptionsActive.labels(datasetName()).dec();
             AutoCloseables.close(root, allocator);
         }

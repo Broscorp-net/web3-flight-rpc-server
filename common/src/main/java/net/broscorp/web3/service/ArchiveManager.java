@@ -19,9 +19,31 @@ public interface ArchiveManager {
     CompletableFuture<Void> archiveRange(long startBlock, long endBlock);
 
     /**
-     * Returns the Arrow IPC bytes for a single block's entry in the named
-     * dataset, or {@code null} if the covering archive object does not exist
-     * or the block is absent from it.
+     * Opens a forward-only sequential reader for the chunk starting at
+     * {@code chunkStart} in the named dataset. Resolves to {@code null} if
+     * the chunk's archive object does not exist. Callers MUST close the
+     * returned reader to release the temp file backing it.
      */
-    CompletableFuture<byte[]> getFromArchive(String dataset, long blockNumber);
+    CompletableFuture<ChunkReader> openChunkReader(String dataset, long chunkStart);
+
+    /**
+     * Forward-only cursor over a single archive chunk. {@link #readBlock} must
+     * be called with strictly increasing block numbers; out-of-order reads
+     * throw. Backed by a temp file released on {@link #close}.
+     */
+    interface ChunkReader extends AutoCloseable {
+        long chunkStart();
+
+        long chunkEnd();
+
+        /**
+         * Returns the single-batch Arrow IPC bytes for {@code blockNumber}, or
+         * {@code null} if the block is absent from the chunk (e.g. the chunk
+         * was assembled with gaps).
+         */
+        byte[] readBlock(long blockNumber) throws Exception;
+
+        @Override
+        void close();
+    }
 }
