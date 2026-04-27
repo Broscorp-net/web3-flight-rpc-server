@@ -91,10 +91,22 @@ public abstract class SequentialSubscription<
                     .withDescription(e.getMessage())
                     .toRuntimeException()
             );
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            // Catch Throwable (not just Exception) so Errors — most importantly
+            // OutOfMemoryError thrown by Netty/Arrow on direct-memory exhaustion
+            // — surface to the client as a real gRPC error instead of vanishing
+            // into a silent stream. Errors are still re-thrown after notifying
+            // the client so JVM-level handlers (e.g. -XX:+ExitOnOutOfMemoryError)
+            // can fire.
             metrics.subscriptionErrorsTotal.labels(datasetName()).inc();
-            log.error("Error in sequential subscription loop", e);
-            listener.error(e);
+            log.error("Error in sequential subscription loop", t);
+            try {
+                listener.error(t);
+            } catch (Throwable ignore) {
+                // Listener may itself fail when out of memory; we've done our
+                // bookkeeping and re-raise of the original happens below.
+            }
+            if (t instanceof Error) throw (Error) t;
         } finally {
             try {
                 close();
