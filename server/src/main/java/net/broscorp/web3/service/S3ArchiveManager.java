@@ -5,6 +5,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -129,16 +130,10 @@ public class S3ArchiveManager implements ArchiveManager {
                     metrics.archiveColdReadDurationSeconds.startTimer();
                 long chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
                 String key = ArchiveKey.objectKey(keyPrefix, dataset, chunkStart, chunkEnd);
-                Path tmp;
-                try {
-                    tmp = Files.createTempFile("cold-" + dataset + "-", ".arrow");
-                } catch (Exception e) {
-                    timer.observeDuration();
-                    metrics.archiveColdReadsTotal.labels(dataset, "failure").inc();
-                    throw new RuntimeException(
-                        "Failed to create cold-read temp file for " + key, e
-                    );
-                }
+                Path tmp = Path.of(
+                    System.getProperty("java.io.tmpdir"),
+                    "cold-" + dataset + "-" + UUID.randomUUID() + ".arrow"
+                );
                 try {
                     try {
                         s3.getObject(
