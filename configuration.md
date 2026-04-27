@@ -80,7 +80,8 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `RETENTION_BLOCKS` | (unset = keep forever) | Hot-cache retention window. **Must be a multiple of 1000** (the archive chunk size). When set, blocks older than `lastIngestedBlock - RETENTION_BLOCKS` are eligible for the archive sweep + prune. |
+| `RETENTION_BLOCKS` | (unset = keep forever) | Hot-cache retention window. **Must be a multiple of `ARCHIVE_CHUNK_SIZE`** and **at least 2 × `ARCHIVE_CHUNK_SIZE`**. When set, blocks older than `lastIngestedBlock - RETENTION_BLOCKS` are eligible for the archive sweep + prune. |
+| `ARCHIVE_CHUNK_SIZE` | `1000` | Size in blocks of each archive chunk written to S3. Must match across writers (server + backfill) for the cleanest layout, but the read-side index tolerates mixed sizes if it changes between runs. Must be `> 0`. |
 | `ARCHIVE_MODE` | `optional` | `off` / `optional` / `required`. See "Archive modes" below. |
 | `S3_BUCKET` | — | Bucket name. Accepts `bucket` or `bucket/prefix`. **Must match the backfill's `S3_BUCKET`** so cold reads find the back-filled chunks. |
 | `S3_REGION` | `us-east-1` | AWS region. |
@@ -103,31 +104,32 @@ older than retention.
 
 ### Chunk alignment on fresh + warm starts
 
-Archive chunks are always written on `CHUNK_SIZE` (1000-block) boundaries:
-`0_1000.arrow`, `1000_2000.arrow`, … The server enforces alignment in
-two places at startup so that misaligned keys don't get added to S3:
+Archive chunks are written on `ARCHIVE_CHUNK_SIZE`-aligned boundaries
+(default `1000`): `0_1000.arrow`, `1000_2000.arrow`, … The server
+enforces alignment in two places at startup so that misaligned keys
+don't get added to S3:
 
 1. **Fresh cache.** If `INITIAL_BLOCK` (or current head, if unset) is
-   not a multiple of `CHUNK_SIZE`, `backfillFloor` is rounded **down**
-   to the chunk boundary. The startup backfill loop fills the small
-   pre-`startFrom` range from S3 (if a prior aligned chunk exists) or
-   from RPC. Cost: at most `CHUNK_SIZE - 1` extra blocks of backfill
-   (so up to ~1000 RPC calls), one-time, only on first start. Logged
-   as `Aligning fresh-cache backfillFloor: X -> Y …`.
-2. **Warm cache** with a misaligned `pruneFloor` inherited from an
-   older server run that wrote misaligned chunks: `archiveDispatchedUpTo`
-   is rounded **up** to the next chunk boundary. The cache blocks
-   between the old `pruneFloor` and the new aligned floor are kept
-   hot until the next sweep, then pruned without producing a new
-   aligned chunk for that partial range. Logged at `WARN`. Those
-   blocks typically still exist in legacy misaligned chunks in S3
-   from the previous run; a future listing-based read index is needed
-   to recover them via the formula-based read path.
+   not a multiple of `ARCHIVE_CHUNK_SIZE`, `backfillFloor` is rounded
+   **down** to the chunk boundary. The startup backfill loop fills the
+   small pre-`startFrom` range from S3 (if a prior aligned chunk
+   exists) or from RPC. Cost: at most `ARCHIVE_CHUNK_SIZE - 1` extra
+   blocks of backfill, one-time, only on first start. Logged as
+   `Aligning fresh-cache backfillFloor: X -> Y …`.
+2. **Warm cache** with a `pruneFloor` not aligned to the current
+   `ARCHIVE_CHUNK_SIZE` (older run used a different size, or wrote
+   misaligned chunks): `archiveDispatchedUpTo` is rounded **up** to
+   the next chunk boundary. The cache blocks between the old
+   `pruneFloor` and the new aligned floor are kept hot until the next
+   sweep, then pruned without producing a new aligned chunk for that
+   partial range. Logged at `WARN`. Those blocks remain readable from
+   any legacy chunks already in S3 — the cold-read listing index
+   tolerates differently-sized and non-aligned chunks coexisting.
 
-If you see the alignment `WARN` at startup, your bucket has legacy
-misaligned chunks (pre-fix server runs). New writes will be clean
-going forward, but the misaligned objects in S3 are best treated as
-unreadable until the listing-index work lands.
+Changing `ARCHIVE_CHUNK_SIZE` between restarts is supported: new
+chunks get written at the new size, old chunks remain readable, and
+lookups pick the chunk with the widest forward coverage when more
+than one covers a given block.
 
 ### Memory + disk during the archive sweep
 
@@ -195,7 +197,7 @@ tracked as a follow-up.
 | Var | Purpose |
 |---|---|
 | `BACKFILL_FROM_BLOCK` | Inclusive lower bound of the range to load. |
-| `BACKFILL_TO_BLOCK` | Inclusive upper bound. The actual processed range is **floor-aligned to chunk boundaries** (1000) on both ends; partial chunks at the edges are left for the live server. |
+| `BACKFILL_TO_BLOCK` | Inclusive upper bound. The actual processed range is **floor-aligned to `ARCHIVE_CHUNK_SIZE` boundaries** on both ends; partial chunks at the edges are left for the live server. |
 | `S3_BUCKET` | Same bucket+prefix the server uses for cold reads. |
 | `AWS_ACCESS_KEY` | |
 | `AWS_SECRET_KEY` | |
@@ -220,6 +222,7 @@ tracked as a follow-up.
 | Var | Default | Purpose |
 |---|---|---|
 | `S3_REGION` | `us-east-1` | |
+| `ARCHIVE_CHUNK_SIZE` | `1000` | Chunk size in blocks. Should match the running server's value for a clean shared layout; mismatched sizes still work because the read index handles variable-size chunks. Must be `> 0`. |
 
 ### Memory
 
@@ -251,7 +254,7 @@ isn't on a small ephemeral overlay if you're running in a container.
 The server triggers an archive + prune when:
 
 ```
-committedBlock >= archiveDispatchedUpTo + 1000 + RETENTION_BLOCKS
+committedBlock >= archiveDispatchedUpTo + ARCHIVE_CHUNK_SIZE + RETENTION_BLOCKS
 ```
 
 So:
@@ -263,9 +266,10 @@ So:
 - **Unset** → no archiving ever; hot cache grows without bound. Fine for a
   dev cache, never for prod.
 
-The `+ 1000` in the formula is the chunk size — the sweep waits for a full
-1000-block chunk to fall outside the retention window before writing.
-That's why `RETENTION_BLOCKS` must be a multiple of 1000.
+The `+ ARCHIVE_CHUNK_SIZE` term is the size of one chunk — the sweep waits
+for a full chunk to fall outside the retention window before writing. That's
+why `RETENTION_BLOCKS` must be a multiple of `ARCHIVE_CHUNK_SIZE` and at
+least `2 × ARCHIVE_CHUNK_SIZE`.
 
 ### 2. `INITIAL_BLOCK` and `BACKFILL_BLOCKS` only fire on a fresh cache
 
@@ -337,9 +341,9 @@ fall through to the RPC fallback (or fail, depending on
 - **`DB_PATH` on ephemeral storage** → "warm restart" is actually always
   cold. Watch for `Cache initialized: lastIngestedBlock=-1` after every
   redeploy — that means RocksDB couldn't find the old DB.
-- **`RETENTION_BLOCKS` not a multiple of 1000** → server fails fast at
-  startup with `RETENTION_BLOCKS (...) must be a multiple of ARCHIVE_CHUNK_SIZE
-  (1000)`. Round it.
+- **`RETENTION_BLOCKS` not a multiple of `ARCHIVE_CHUNK_SIZE`** (or
+  smaller than `2 × ARCHIVE_CHUNK_SIZE`) → server fails fast at startup
+  with the relevant message. Round it.
 - **`ARCHIVE_MODE=optional` + `RETENTION_BLOCKS` set + S3 not configured**
   → server starts (mode is `optional`) but pruned blocks are lost forever.
   Use `required` in prod to fail fast on missing creds.

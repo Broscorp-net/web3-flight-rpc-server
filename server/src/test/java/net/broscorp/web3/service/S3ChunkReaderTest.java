@@ -123,7 +123,7 @@ class S3ChunkReaderTest {
         ) {
             assertThatThrownBy(() -> r.readBlock(chunkStart - 1))
                 .isInstanceOf(IllegalArgumentException.class);
-            assertThatThrownBy(() -> r.readBlock(chunkStart + ArchiveKey.CHUNK_SIZE))
+            assertThatThrownBy(() -> r.readBlock(chunkStart + ArchiveKey.DEFAULT_CHUNK_SIZE))
                 .isInstanceOf(IllegalArgumentException.class);
         }
     }
@@ -156,7 +156,7 @@ class S3ChunkReaderTest {
             allocator,
             ArchiveManager.DATASET_BLOCKS,
             chunkStart,
-            chunkStart + ArchiveKey.CHUNK_SIZE,
+            chunkStart + ArchiveKey.DEFAULT_CHUNK_SIZE,
             Converter.BLOCK_NUMBER,
             file,
             metrics

@@ -3,19 +3,25 @@ package net.broscorp.web3.archive;
 /**
  * S3 cold-tier object-key layout.
  *
- * <p>Single source of truth for the chunk-size and key format used by every
- * writer (live ingestor archive sweep, batch backfill jobs) and reader
- * (cold-tier lookup) so they cannot drift.
+ * <p>Single source of truth for the key format used by every writer (live
+ * ingestor archive sweep, batch backfill jobs) and reader (cold-tier
+ * lookup) so they cannot drift. Chunk size is supplied by the caller —
+ * it is configured per process via {@code ARCHIVE_CHUNK_SIZE} and may
+ * differ across runs that share an S3 prefix; the read-side index
+ * tolerates the resulting variable-size layout.
  */
 public final class ArchiveKey {
 
-    public static final long CHUNK_SIZE = 1000;
+    public static final long DEFAULT_CHUNK_SIZE = 1000;
 
     private ArchiveKey() {}
 
-    /** Lower bound (inclusive) of the chunk that contains {@code blockNumber}. */
-    public static long chunkStartFor(long blockNumber) {
-        return (blockNumber / CHUNK_SIZE) * CHUNK_SIZE;
+    /**
+     * Lower bound (inclusive) of the chunk of size {@code chunkSize} that
+     * contains {@code blockNumber}.
+     */
+    public static long chunkStartFor(long blockNumber, long chunkSize) {
+        return (blockNumber / chunkSize) * chunkSize;
     }
 
     /**

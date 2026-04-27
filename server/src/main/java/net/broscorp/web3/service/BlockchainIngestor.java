@@ -99,6 +99,7 @@ public class BlockchainIngestor implements AutoCloseable {
     private volatile Disposable headSubscription;
 
     private Long retentionBlocks;
+    private long archiveChunkSize;
     private ArchiveManager archiveManager;
     private long archiveDispatchedUpTo;
 
@@ -151,16 +152,29 @@ public class BlockchainIngestor implements AutoCloseable {
         Long retentionBlocks,
         ArchiveManager archiveManager
     ) throws RocksDBException {
-        start(initialBlock, retentionBlocks, archiveManager, DEFAULT_BACKFILL_BLOCKS);
+        start(
+            initialBlock,
+            retentionBlocks,
+            archiveManager,
+            DEFAULT_BACKFILL_BLOCKS,
+            ArchiveKey.DEFAULT_CHUNK_SIZE
+        );
     }
 
     public void start(
         Long initialBlock,
         Long retentionBlocks,
         ArchiveManager archiveManager,
-        long backfillBlocks
+        long backfillBlocks,
+        long archiveChunkSize
     ) throws RocksDBException {
+        if (archiveChunkSize <= 0) {
+            throw new IllegalArgumentException(
+                "archiveChunkSize must be positive: " + archiveChunkSize
+            );
+        }
         this.retentionBlocks = retentionBlocks;
+        this.archiveChunkSize = archiveChunkSize;
         this.archiveManager = archiveManager;
 
         boolean freshCache = cache.getLastIngestedBlock() < 0;
@@ -192,11 +206,11 @@ public class BlockchainIngestor implements AutoCloseable {
             }
             // Round backfillFloor DOWN to the chunk boundary so the very first
             // archive sweep produces an aligned chunk. Without this, a fresh
-            // start at a non-multiple-of-CHUNK_SIZE block lays down misaligned
+            // start at a non-multiple-of-chunkSize block lays down misaligned
             // chunks (e.g. 24964344_24965344) that future formula-based reads
-            // can't find. Costs at most CHUNK_SIZE-1 extra blocks of backfill,
+            // can't find. Costs at most chunkSize-1 extra blocks of backfill,
             // filled from S3 (if a prior aligned chunk exists) or RPC.
-            long alignedFloor = ArchiveKey.chunkStartFor(backfillFloor);
+            long alignedFloor = ArchiveKey.chunkStartFor(backfillFloor, archiveChunkSize);
             if (alignedFloor < backfillFloor) {
                 log.info(
                     "Aligning fresh-cache backfillFloor: {} -> {} (extending {} "
@@ -214,23 +228,24 @@ public class BlockchainIngestor implements AutoCloseable {
         }
 
         long pruneFloor = cache.getPruneFloor();
-        long alignedPruneFloor = ArchiveKey.chunkStartFor(pruneFloor);
+        long alignedPruneFloor = ArchiveKey.chunkStartFor(pruneFloor, archiveChunkSize);
         if (alignedPruneFloor == pruneFloor) {
             this.archiveDispatchedUpTo = pruneFloor;
         } else {
-            // Warm restart inherited a misaligned pruneFloor from an older
-            // server run that wrote chunks at non-aligned boundaries. Round up
-            // so future sweeps emit aligned chunks. Cache blocks below the new
-            // floor will be pruned without producing a NEW aligned chunk; they
-            // typically already exist in legacy misaligned chunks in S3 (only
-            // recoverable once the cold-read path uses a listing index).
-            long advanced = alignedPruneFloor + ArchiveKey.CHUNK_SIZE;
+            // Warm restart inherited a pruneFloor that does not align to the
+            // currently-configured chunk size (older run used a different
+            // size, or hand-edited cache state). Round up so future sweeps
+            // emit aligned chunks at the current size. Cache blocks below the
+            // new floor will be pruned without producing a new aligned chunk;
+            // they remain readable from legacy chunks via the cold-read
+            // listing index.
+            long advanced = alignedPruneFloor + archiveChunkSize;
             log.warn(
                 "pruneFloor {} is not aligned to chunk size {}; advancing "
                     + "archiveDispatchedUpTo to {}. Cache blocks [{}, {}) will "
                     + "be pruned without producing a new aligned chunk.",
                 pruneFloor,
-                ArchiveKey.CHUNK_SIZE,
+                archiveChunkSize,
                 advanced,
                 pruneFloor,
                 advanced
@@ -529,10 +544,10 @@ public class BlockchainIngestor implements AutoCloseable {
         if (retentionBlocks == null) return;
         while (
             committedBlock >=
-            archiveDispatchedUpTo + ArchiveKey.CHUNK_SIZE + retentionBlocks
+            archiveDispatchedUpTo + archiveChunkSize + retentionBlocks
         ) {
             final long start = archiveDispatchedUpTo;
-            final long end = start + ArchiveKey.CHUNK_SIZE;
+            final long end = start + archiveChunkSize;
             archiveExecutor.submit(() -> runArchiveAndPrune(start, end));
             archiveDispatchedUpTo = end;
         }
@@ -544,7 +559,7 @@ public class BlockchainIngestor implements AutoCloseable {
             long n = fromInclusive;
             while (n >= toInclusive) {
                 if (Thread.currentThread().isInterrupted()) return;
-                long chunkStart = ArchiveKey.chunkStartFor(n);
+                long chunkStart = ArchiveKey.chunkStartFor(n, archiveChunkSize);
                 long firstInChunk = Math.max(toInclusive, chunkStart);
                 backfillChunk(firstInChunk, n);
                 n = chunkStart - 1;

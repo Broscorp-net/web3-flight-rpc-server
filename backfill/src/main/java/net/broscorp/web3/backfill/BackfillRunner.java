@@ -64,14 +64,21 @@ public final class BackfillRunner {
         int fetchParallelism = (int) longEnvOr("BACKFILL_FETCH_PARALLELISM", 8L);
         boolean skipExisting = boolEnvOr("BACKFILL_SKIP_EXISTING", true);
         double maxRps = doubleEnvOr("BACKFILL_MAX_RPS", 0.0);
+        long chunkSize = longEnvOr("ARCHIVE_CHUNK_SIZE", ArchiveKey.DEFAULT_CHUNK_SIZE);
+
+        if (chunkSize <= 0) {
+            throw new IllegalArgumentException(
+                "ARCHIVE_CHUNK_SIZE must be > 0 (got " + chunkSize + ")"
+            );
+        }
 
         String s3Bucket = requiredEnv("S3_BUCKET");
         String s3Region = envOr("S3_REGION", "us-east-1");
         String awsAccessKey = requiredEnv("AWS_ACCESS_KEY");
         String awsSecretKey = requiredEnv("AWS_SECRET_KEY");
 
-        long firstChunkStart = ArchiveKey.chunkStartFor(fromBlock);
-        long lastChunkStartExclusive = ArchiveKey.chunkStartFor(toBlock);
+        long firstChunkStart = ArchiveKey.chunkStartFor(fromBlock, chunkSize);
+        long lastChunkStartExclusive = ArchiveKey.chunkStartFor(toBlock, chunkSize);
         if (firstChunkStart >= lastChunkStartExclusive) {
             log.warn(
                 "Range [{}, {}] yields no whole chunks — nothing to do",
@@ -82,11 +89,11 @@ public final class BackfillRunner {
         }
 
         long chunkCount =
-            (lastChunkStartExclusive - firstChunkStart) / ArchiveKey.CHUNK_SIZE;
+            (lastChunkStartExclusive - firstChunkStart) / chunkSize;
         log.info(
             "Backfill plan: {} chunks of {} blocks each — [{}, {}) using source={}, fetchParallelism={}, maxRps={}",
             chunkCount,
-            ArchiveKey.CHUNK_SIZE,
+            chunkSize,
             firstChunkStart,
             lastChunkStartExclusive,
             sourceKind,
@@ -121,9 +128,9 @@ public final class BackfillRunner {
             for (
                 long chunkStart = firstChunkStart;
                 chunkStart < lastChunkStartExclusive;
-                chunkStart += ArchiveKey.CHUNK_SIZE
+                chunkStart += chunkSize
             ) {
-                long chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
+                long chunkEnd = chunkStart + chunkSize;
                 if (
                     skipExisting &&
                     writer.chunkExists(ArchiveManager.DATASET_BLOCKS, chunkStart, chunkEnd) &&
@@ -161,7 +168,7 @@ public final class BackfillRunner {
                     double bps = (double) totalBlocks / runElapsedSec;
                     long remaining = chunkCount - processed;
                     String eta = (bps > 0 && remaining > 0)
-                        ? formatDuration((long) (remaining * ArchiveKey.CHUNK_SIZE / bps))
+                        ? formatDuration((long) (remaining * chunkSize / bps))
                         : "—";
                     log.info(
                         "Progress: {}/{} chunks (uploaded={}, skipped={}, aborted={}) — {} blocks @ {} blocks/sec, {} written, ETA {}",

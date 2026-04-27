@@ -59,6 +59,7 @@ public class FlightRpcServer {
         String initialBlockString = System.getenv("INITIAL_BLOCK");
         String retentionBlocksString = System.getenv("RETENTION_BLOCKS");
         String backfillBlocksString = System.getenv("BACKFILL_BLOCKS");
+        String chunkSizeString = System.getenv("ARCHIVE_CHUNK_SIZE");
         String dbPath = System.getenv("DB_PATH");
 
         String archiveModeString = System.getenv("ARCHIVE_MODE");
@@ -84,16 +85,32 @@ public class FlightRpcServer {
             backfillBlocksString != null
                 ? Long.parseLong(backfillBlocksString)
                 : BlockchainIngestor.DEFAULT_BACKFILL_BLOCKS;
+        long archiveChunkSize =
+            chunkSizeString != null
+                ? Long.parseLong(chunkSizeString)
+                : ArchiveKey.DEFAULT_CHUNK_SIZE;
         ArchiveMode archiveMode = ArchiveMode.parse(archiveModeString);
 
+        if (archiveChunkSize <= 0) {
+            log.error("ARCHIVE_CHUNK_SIZE must be > 0 (got {})", archiveChunkSize);
+            System.exit(-1);
+        }
+        if (retentionBlocks != null && archiveChunkSize * 2 > retentionBlocks) {
+            log.error(
+                "RETENTION_BLOCKS ({}) must be at least 2 * ARCHIVE_CHUNK_SIZE ({})",
+                retentionBlocks,
+                archiveChunkSize
+            );
+            System.exit(-1);
+        }
         if (
             retentionBlocks != null &&
-            retentionBlocks % ArchiveKey.CHUNK_SIZE != 0
+            retentionBlocks % archiveChunkSize != 0
         ) {
             log.error(
                 "RETENTION_BLOCKS ({}) must be a multiple of ARCHIVE_CHUNK_SIZE ({})",
                 retentionBlocks,
-                ArchiveKey.CHUNK_SIZE
+                archiveChunkSize
             );
             System.exit(-1);
         }
@@ -177,6 +194,7 @@ public class FlightRpcServer {
                 initialBlock,
                 retentionBlocks,
                 backfillBlocks,
+                archiveChunkSize,
                 useS3 ? s3Bucket : null,
                 s3Region,
                 awsAccessKey,
@@ -205,6 +223,7 @@ public class FlightRpcServer {
         Long initialBlock,
         Long retentionBlocks,
         long backfillBlocks,
+        long archiveChunkSize,
         String s3Bucket,
         String s3Region,
         String awsAccessKey,
@@ -251,7 +270,13 @@ public class FlightRpcServer {
                     metrics
                 )
             ) {
-                ingestor.start(initialBlock, retentionBlocks, archiveManager, backfillBlocks);
+                ingestor.start(
+                    initialBlock,
+                    retentionBlocks,
+                    archiveManager,
+                    backfillBlocks,
+                    archiveChunkSize
+                );
 
                 SubscriptionFactory subscriptionFactory = new SubscriptionFactory(
                     rootAllocator,

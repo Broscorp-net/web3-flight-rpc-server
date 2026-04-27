@@ -157,8 +157,8 @@ class SequentialSubscriptionTest {
         when(cache.getLogsOrWait(5L)).thenReturn(CacheResult.pruned());
         ArchiveManager archive = mock(ArchiveManager.class);
         ArchiveManager.ChunkReader reader = mock(ArchiveManager.ChunkReader.class);
-        long chunkStart = ArchiveKey.chunkStartFor(5L);
-        when(reader.chunkEnd()).thenReturn(chunkStart + ArchiveKey.CHUNK_SIZE);
+        long chunkStart = ArchiveKey.chunkStartFor(5L, ArchiveKey.DEFAULT_CHUNK_SIZE);
+        when(reader.chunkEnd()).thenReturn(chunkStart + ArchiveKey.DEFAULT_CHUNK_SIZE);
         when(reader.readBlock(5L)).thenReturn(archivedLogs);
         when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, 5L))
             .thenReturn(CompletableFuture.completedFuture(reader));
@@ -179,7 +179,7 @@ class SequentialSubscriptionTest {
 
     @Test
     void prunedConsecutive_opensChunkReaderOnce() throws Exception {
-        long chunkStart = ArchiveKey.chunkStartFor(5L);
+        long chunkStart = ArchiveKey.chunkStartFor(5L, ArchiveKey.DEFAULT_CHUNK_SIZE);
         long block1 = chunkStart + 5;
         long block2 = chunkStart + 6;
 
@@ -196,7 +196,7 @@ class SequentialSubscriptionTest {
 
         ArchiveManager archive = mock(ArchiveManager.class);
         ArchiveManager.ChunkReader reader = mock(ArchiveManager.ChunkReader.class);
-        when(reader.chunkEnd()).thenReturn(chunkStart + ArchiveKey.CHUNK_SIZE);
+        when(reader.chunkEnd()).thenReturn(chunkStart + ArchiveKey.DEFAULT_CHUNK_SIZE);
         when(reader.readBlock(block1)).thenReturn(payload);
         when(reader.readBlock(block2)).thenReturn(payload);
         when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, block1))
