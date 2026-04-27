@@ -19,12 +19,16 @@ public interface ArchiveManager {
     CompletableFuture<Void> archiveRange(long startBlock, long endBlock);
 
     /**
-     * Opens a forward-only sequential reader for the chunk starting at
-     * {@code chunkStart} in the named dataset. Resolves to {@code null} if
-     * the chunk's archive object does not exist. Callers MUST close the
-     * returned reader to release the temp file backing it.
+     * Opens a forward-only sequential reader for the archive chunk that
+     * contains {@code blockNumber} in the named dataset. The chunk's actual
+     * range is exposed via {@link ChunkReader#chunkStart()} /
+     * {@link ChunkReader#chunkEnd()} — it may differ from the current
+     * archive-write chunk size when legacy or differently-sized chunks
+     * coexist in storage. Resolves to {@code null} if no chunk covers the
+     * block. Callers MUST close the returned reader to release the temp
+     * file backing it.
      */
-    CompletableFuture<ChunkReader> openChunkReader(String dataset, long chunkStart);
+    CompletableFuture<ChunkReader> openChunkReader(String dataset, long blockNumber);
 
     /**
      * Forward-only cursor over a single archive chunk. {@link #readBlock} must

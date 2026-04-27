@@ -156,6 +156,7 @@ class S3ChunkReaderTest {
             allocator,
             ArchiveManager.DATASET_BLOCKS,
             chunkStart,
+            chunkStart + ArchiveKey.CHUNK_SIZE,
             Converter.BLOCK_NUMBER,
             file,
             metrics

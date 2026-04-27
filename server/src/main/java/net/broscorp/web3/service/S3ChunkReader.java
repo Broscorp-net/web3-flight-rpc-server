@@ -7,7 +7,6 @@ import java.nio.channels.Channels;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import lombok.extern.slf4j.Slf4j;
-import net.broscorp.web3.archive.ArchiveKey;
 import net.broscorp.web3.metrics.Metrics;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
@@ -50,13 +49,14 @@ class S3ChunkReader implements ArchiveManager.ChunkReader {
         BufferAllocator allocator,
         String dataset,
         long chunkStart,
+        long chunkEnd,
         String blockNumberField,
         Path file,
         Metrics metrics
     ) throws Exception {
         this.dataset = dataset;
         this.chunkStart = chunkStart;
-        this.chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
+        this.chunkEnd = chunkEnd;
         this.blockNumberField = blockNumberField;
         this.file = file;
         this.metrics = metrics;

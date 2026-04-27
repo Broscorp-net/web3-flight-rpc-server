@@ -546,7 +546,7 @@ public class BlockchainIngestor implements AutoCloseable {
                 if (Thread.currentThread().isInterrupted()) return;
                 long chunkStart = ArchiveKey.chunkStartFor(n);
                 long firstInChunk = Math.max(toInclusive, chunkStart);
-                backfillChunk(chunkStart, firstInChunk, n);
+                backfillChunk(firstInChunk, n);
                 n = chunkStart - 1;
             }
             log.info("Backfill complete: range [{}, {}]", toInclusive, fromInclusive);
@@ -557,52 +557,29 @@ public class BlockchainIngestor implements AutoCloseable {
     }
 
     /**
-     * Backfills {@code [firstBlock, lastBlock]} (both inclusive, all in the
-     * chunk starting at {@code chunkStart}) into the cache. Opens the chunk's
-     * archive readers once; falls back to RPC per block on any open failure
-     * or any in-chunk gap.
+     * Backfills {@code [firstBlock, lastBlock]} (both inclusive) into the
+     * cache. Opens an archive reader the first time a block needs one and
+     * keeps it as long as subsequent blocks fall within its chunk range;
+     * a block past the reader's end (or a reader open failure) triggers a
+     * fresh open. Any per-block read miss falls back to RPC.
      */
-    private void backfillChunk(long chunkStart, long firstBlock, long lastBlock)
+    private void backfillChunk(long firstBlock, long lastBlock)
         throws InterruptedException {
         ArchiveManager.ChunkReader blocksReader = null;
         ArchiveManager.ChunkReader logsReader = null;
-        if (archiveManager != null) {
-            try {
-                blocksReader = archiveManager
-                    .openChunkReader(ArchiveManager.DATASET_BLOCKS, chunkStart)
-                    .get();
-                logsReader = archiveManager
-                    .openChunkReader(ArchiveManager.DATASET_LOGS, chunkStart)
-                    .get();
-                if (blocksReader == null || logsReader == null) {
-                    closeQuietly(blocksReader);
-                    closeQuietly(logsReader);
-                    blocksReader = null;
-                    logsReader = null;
-                }
-            } catch (InterruptedException e) {
-                closeQuietly(blocksReader);
-                closeQuietly(logsReader);
-                throw e;
-            } catch (Exception e) {
-                log.warn(
-                    "Archive open failed for chunk [{}, {}); falling back to RPC: {}",
-                    chunkStart,
-                    chunkStart + ArchiveKey.CHUNK_SIZE,
-                    e.toString()
-                );
-                closeQuietly(blocksReader);
-                closeQuietly(logsReader);
-                blocksReader = null;
-                logsReader = null;
-            }
-        }
-
         try {
             for (long n = firstBlock; n <= lastBlock; n++) {
                 if (Thread.currentThread().isInterrupted()) return;
                 try {
-                    if (blocksReader != null && logsReader != null) {
+                    if (archiveManager != null
+                        && (blocksReader == null || n >= blocksReader.chunkEnd())) {
+                        closeQuietly(blocksReader);
+                        closeQuietly(logsReader);
+                        blocksReader = openReaderQuietly(ArchiveManager.DATASET_BLOCKS, n);
+                        logsReader = openReaderQuietly(ArchiveManager.DATASET_LOGS, n);
+                    }
+                    if (blocksReader != null && logsReader != null
+                        && n < blocksReader.chunkEnd() && n < logsReader.chunkEnd()) {
                         byte[] blockIpc = blocksReader.readBlock(n);
                         byte[] logsIpc = logsReader.readBlock(n);
                         if (blockIpc != null && logsIpc != null) {
@@ -610,10 +587,7 @@ public class BlockchainIngestor implements AutoCloseable {
                             continue;
                         }
                         log.warn(
-                            "Archive chunk [{}, {}) missing block {}; falling back to RPC",
-                            chunkStart,
-                            chunkStart + ArchiveKey.CHUNK_SIZE,
-                            n
+                            "Archive chunk missing block {}; falling back to RPC", n
                         );
                     }
                     backfillFromRpc(n);
@@ -626,6 +600,21 @@ public class BlockchainIngestor implements AutoCloseable {
         } finally {
             closeQuietly(blocksReader);
             closeQuietly(logsReader);
+        }
+    }
+
+    private ArchiveManager.ChunkReader openReaderQuietly(String dataset, long blockNumber) {
+        try {
+            return archiveManager.openChunkReader(dataset, blockNumber).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception e) {
+            log.warn(
+                "Archive open failed for {} block {}; falling back to RPC: {}",
+                dataset, blockNumber, e.toString()
+            );
+            return null;
         }
     }
 

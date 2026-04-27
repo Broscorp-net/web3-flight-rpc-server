@@ -2,6 +2,7 @@ package net.broscorp.web3.server;
 
 import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import lombok.extern.slf4j.Slf4j;
@@ -228,7 +229,8 @@ public class FlightRpcServer {
                     )
                     .build();
                 s3ArchiveManager = new S3ArchiveManager(
-                    s3, s3Bucket, cache, converter, archiveAllocator, metrics
+                    s3, s3Bucket, cache, converter, archiveAllocator, metrics,
+                    Duration.ofMinutes(10)
                 );
                 archiveManager = s3ArchiveManager;
                 log.info("S3 archiving enabled for bucket: {}", s3Bucket);

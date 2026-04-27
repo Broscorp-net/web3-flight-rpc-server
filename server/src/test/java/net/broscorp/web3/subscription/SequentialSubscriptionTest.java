@@ -158,9 +158,9 @@ class SequentialSubscriptionTest {
         ArchiveManager archive = mock(ArchiveManager.class);
         ArchiveManager.ChunkReader reader = mock(ArchiveManager.ChunkReader.class);
         long chunkStart = ArchiveKey.chunkStartFor(5L);
-        when(reader.chunkStart()).thenReturn(chunkStart);
+        when(reader.chunkEnd()).thenReturn(chunkStart + ArchiveKey.CHUNK_SIZE);
         when(reader.readBlock(5L)).thenReturn(archivedLogs);
-        when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, chunkStart))
+        when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, 5L))
             .thenReturn(CompletableFuture.completedFuture(reader));
 
         VectorSchemaRoot root = VectorSchemaRoot.create(
@@ -196,10 +196,10 @@ class SequentialSubscriptionTest {
 
         ArchiveManager archive = mock(ArchiveManager.class);
         ArchiveManager.ChunkReader reader = mock(ArchiveManager.ChunkReader.class);
-        when(reader.chunkStart()).thenReturn(chunkStart);
+        when(reader.chunkEnd()).thenReturn(chunkStart + ArchiveKey.CHUNK_SIZE);
         when(reader.readBlock(block1)).thenReturn(payload);
         when(reader.readBlock(block2)).thenReturn(payload);
-        when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, chunkStart))
+        when(archive.openChunkReader(ArchiveManager.DATASET_LOGS, block1))
             .thenReturn(CompletableFuture.completedFuture(reader));
 
         VectorSchemaRoot root = VectorSchemaRoot.create(
@@ -217,7 +217,7 @@ class SequentialSubscriptionTest {
         // Two pruned reads from the same chunk should result in exactly ONE
         // S3 download, not two.
         verify(archive, times(1)).openChunkReader(
-            eq(ArchiveManager.DATASET_LOGS), eq(chunkStart)
+            eq(ArchiveManager.DATASET_LOGS), eq(block1)
         );
         // Reader is closed when the subscription terminates.
         verify(reader).close();

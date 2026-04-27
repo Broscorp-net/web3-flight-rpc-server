@@ -5,7 +5,6 @@ import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
-import net.broscorp.web3.archive.ArchiveKey;
 import net.broscorp.web3.dto.request.ClientRequest;
 import net.broscorp.web3.metrics.Metrics;
 import net.broscorp.web3.service.ArchiveManager;
@@ -139,16 +138,15 @@ public abstract class SequentialSubscription<
                 "Block " + blockNumber + " is pruned and no archive is configured"
             );
         }
-        long chunkStart = ArchiveKey.chunkStartFor(blockNumber);
-        if (currentChunkReader == null || currentChunkReader.chunkStart() != chunkStart) {
+        if (currentChunkReader == null || blockNumber >= currentChunkReader.chunkEnd()) {
             closeChunkReader();
             currentChunkReader =
-                archive.openChunkReader(datasetName(), chunkStart).get();
+                archive.openChunkReader(datasetName(), blockNumber).get();
             if (currentChunkReader == null) {
                 throw new IllegalStateException(
-                    "Block " + blockNumber + " is pruned but archive chunk ["
-                        + chunkStart + ", " + (chunkStart + ArchiveKey.CHUNK_SIZE)
-                        + ") does not exist (dataset=" + datasetName() + ")"
+                    "Block " + blockNumber
+                        + " is pruned but no archive chunk covers it (dataset="
+                        + datasetName() + ")"
                 );
             }
         }
