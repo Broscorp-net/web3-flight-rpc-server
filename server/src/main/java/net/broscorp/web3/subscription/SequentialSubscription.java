@@ -199,6 +199,27 @@ public abstract class SequentialSubscription<
 
     protected abstract void processBatch(VectorSchemaRoot batchRoot);
 
+    /**
+     * Wraps {@link FlightProducer.ServerStreamListener#putNext} with a
+     * stopwatch and logs anything slower than 100 ms. A normal putNext is a
+     * non-blocking hand-off into gRPC's send buffer (microseconds); any
+     * meaningful duration here means the client is consuming slower than the
+     * server is producing and gRPC backpressure is parking this thread
+     * until the buffer drains. Long stalls show up here as multi-second
+     * (or longer) durations.
+     */
+    protected void putNextTimed() {
+        long startNs = System.nanoTime();
+        listener.putNext();
+        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+        if (elapsedMs >= 100) {
+            log.warn(
+                "Slow putNext: {}ms (dataset={})",
+                elapsedMs, datasetName()
+            );
+        }
+    }
+
     @Override
     public void close() throws Exception {
         if (isTerminated.compareAndSet(false, true)) {
