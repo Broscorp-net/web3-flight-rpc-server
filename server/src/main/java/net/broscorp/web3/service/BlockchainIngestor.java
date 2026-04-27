@@ -190,12 +190,53 @@ public class BlockchainIngestor implements AutoCloseable {
             if (backfillBlocks > 0) {
                 backfillFloor = Math.max(0L, startFrom - backfillBlocks);
             }
+            // Round backfillFloor DOWN to the chunk boundary so the very first
+            // archive sweep produces an aligned chunk. Without this, a fresh
+            // start at a non-multiple-of-CHUNK_SIZE block lays down misaligned
+            // chunks (e.g. 24964344_24965344) that future formula-based reads
+            // can't find. Costs at most CHUNK_SIZE-1 extra blocks of backfill,
+            // filled from S3 (if a prior aligned chunk exists) or RPC.
+            long alignedFloor = ArchiveKey.chunkStartFor(backfillFloor);
+            if (alignedFloor < backfillFloor) {
+                log.info(
+                    "Aligning fresh-cache backfillFloor: {} -> {} (extending {} "
+                        + "blocks for chunk-aligned archive layout)",
+                    backfillFloor,
+                    alignedFloor,
+                    backfillFloor - alignedFloor
+                );
+                backfillFloor = alignedFloor;
+            }
             if (backfillFloor > cache.getPruneFloor()) {
                 cache.prune(backfillFloor);
             }
             cache.setForwardStart(startFrom);
         }
-        this.archiveDispatchedUpTo = cache.getPruneFloor();
+
+        long pruneFloor = cache.getPruneFloor();
+        long alignedPruneFloor = ArchiveKey.chunkStartFor(pruneFloor);
+        if (alignedPruneFloor == pruneFloor) {
+            this.archiveDispatchedUpTo = pruneFloor;
+        } else {
+            // Warm restart inherited a misaligned pruneFloor from an older
+            // server run that wrote chunks at non-aligned boundaries. Round up
+            // so future sweeps emit aligned chunks. Cache blocks below the new
+            // floor will be pruned without producing a NEW aligned chunk; they
+            // typically already exist in legacy misaligned chunks in S3 (only
+            // recoverable once the cold-read path uses a listing index).
+            long advanced = alignedPruneFloor + ArchiveKey.CHUNK_SIZE;
+            log.warn(
+                "pruneFloor {} is not aligned to chunk size {}; advancing "
+                    + "archiveDispatchedUpTo to {}. Cache blocks [{}, {}) will "
+                    + "be pruned without producing a new aligned chunk.",
+                pruneFloor,
+                ArchiveKey.CHUNK_SIZE,
+                advanced,
+                pruneFloor,
+                advanced
+            );
+            this.archiveDispatchedUpTo = advanced;
+        }
 
         log.info(
             "Starting ingestion from block {} (retention={}, archiving={}, maxInflight={}, backfill=[{}, {}))",

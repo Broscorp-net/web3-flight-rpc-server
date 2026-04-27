@@ -1,8 +1,5 @@
 package net.broscorp.web3.service;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,9 +15,6 @@ import net.broscorp.web3.archive.StreamingChunkWriter;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.vector.ipc.ArrowStreamReader;
-import org.apache.arrow.vector.ipc.ArrowStreamWriter;
 import org.apache.arrow.vector.types.pojo.Schema;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -32,9 +26,11 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * S3-backed cold archive.
  *
  * <p>Object layout: {@code <dataset>/<startBlock>_<endBlock>.arrow} (exclusive
- * end) holds an Arrow IPC stream with exactly one {@code RecordBatch} per block
- * in order. Blocks are addressable in O(1) via
- * {@code batchIndex = blockNumber - startBlock}.
+ * end) holds an Arrow IPC stream with one {@code RecordBatch} per block in
+ * ascending block-number order. Readers walk the stream and match each
+ * batch's block-number column against the requested block, so chunks
+ * tolerate gaps and non-aligned starts (legacy data from older versions of
+ * the sweep).
  *
  * <p>Both archive writes and cold-tier reads are serialized via a
  * single-threaded executor so that ingestion-driven archives can never
@@ -158,7 +154,14 @@ public class S3ArchiveManager implements ArchiveManager {
                         deleteQuietly(tmp);
                         return null;
                     }
-                    return new S3ChunkReader(allocator, dataset, chunkStart, tmp, metrics);
+                    return new S3ChunkReader(
+                        allocator,
+                        dataset,
+                        chunkStart,
+                        blockNumberFieldFor(dataset),
+                        tmp,
+                        metrics
+                    );
                 } catch (Exception e) {
                     deleteQuietly(tmp);
                     metrics.archiveColdReadsTotal.labels(dataset, "failure").inc();
@@ -179,6 +182,16 @@ public class S3ArchiveManager implements ArchiveManager {
         } catch (Exception e) {
             log.warn("Failed to delete cold-read temp file {}", file, e);
         }
+    }
+
+    private static String blockNumberFieldFor(String dataset) {
+        return switch (dataset) {
+            case DATASET_BLOCKS -> Converter.BLOCK_NUMBER;
+            case DATASET_LOGS -> Converter.LOG_BLOCK_NUMBER;
+            default -> throw new IllegalArgumentException(
+                "Unknown dataset: " + dataset
+            );
+        };
     }
 
     private interface CacheLookup {
@@ -236,108 +249,5 @@ public class S3ArchiveManager implements ArchiveManager {
 
     public void close() {
         executor.shutdown();
-    }
-
-    /**
-     * Forward-only cursor over a single chunk file. State machine:
-     * {@code nextBatchIndex} is the index of the batch that the next
-     * {@link ArrowStreamReader#loadNextBatch} call would load. {@link #readBlock}
-     * is required to be called with strictly increasing block numbers; the
-     * reader advances the underlying stream until the requested batch is loaded
-     * and then returns it serialized as single-batch IPC bytes.
-     */
-    private static class S3ChunkReader implements ChunkReader {
-
-        private final String dataset;
-        private final long chunkStart;
-        private final long chunkEnd;
-        private final Path file;
-        private final InputStream in;
-        private final ArrowStreamReader reader;
-        private final Metrics metrics;
-        private long nextBatchIndex;
-
-        S3ChunkReader(
-            BufferAllocator allocator,
-            String dataset,
-            long chunkStart,
-            Path file,
-            Metrics metrics
-        ) throws Exception {
-            this.dataset = dataset;
-            this.chunkStart = chunkStart;
-            this.chunkEnd = chunkStart + ArchiveKey.CHUNK_SIZE;
-            this.file = file;
-            this.metrics = metrics;
-            this.in = Files.newInputStream(file);
-            try {
-                this.reader = new ArrowStreamReader(in, allocator);
-            } catch (Exception e) {
-                in.close();
-                throw e;
-            }
-        }
-
-        @Override
-        public long chunkStart() {
-            return chunkStart;
-        }
-
-        @Override
-        public long chunkEnd() {
-            return chunkEnd;
-        }
-
-        @Override
-        public byte[] readBlock(long blockNumber) throws Exception {
-            if (blockNumber < chunkStart || blockNumber >= chunkEnd) {
-                throw new IllegalArgumentException(
-                    "Block " + blockNumber + " is outside chunk ["
-                        + chunkStart + ", " + chunkEnd + ")"
-                );
-            }
-            long targetIndex = blockNumber - chunkStart;
-            if (targetIndex < nextBatchIndex) {
-                throw new IllegalArgumentException(
-                    "Out-of-order chunk read: blockNumber=" + blockNumber
-                        + " is before the cursor for chunk starting at " + chunkStart
-                );
-            }
-            while (nextBatchIndex <= targetIndex) {
-                if (!reader.loadNextBatch()) {
-                    metrics.archiveColdReadsTotal.labels(dataset, "miss").inc();
-                    return null;
-                }
-                nextBatchIndex++;
-            }
-            VectorSchemaRoot root = reader.getVectorSchemaRoot();
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (
-                ArrowStreamWriter writer = new ArrowStreamWriter(
-                    root, null, Channels.newChannel(out)
-                )
-            ) {
-                writer.start();
-                writer.writeBatch();
-                writer.end();
-            }
-            metrics.archiveColdReadsTotal.labels(dataset, "hit").inc();
-            return out.toByteArray();
-        }
-
-        @Override
-        public void close() {
-            try {
-                reader.close();
-            } catch (Exception e) {
-                log.warn("Failed to close ArrowStreamReader for {}", file, e);
-            }
-            try {
-                in.close();
-            } catch (Exception e) {
-                log.warn("Failed to close InputStream for {}", file, e);
-            }
-            deleteQuietly(file);
-        }
     }
 }

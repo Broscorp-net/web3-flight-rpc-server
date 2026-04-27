@@ -101,6 +101,34 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 startup — you're explicitly opting into permanent data loss for blocks
 older than retention.
 
+### Chunk alignment on fresh + warm starts
+
+Archive chunks are always written on `CHUNK_SIZE` (1000-block) boundaries:
+`0_1000.arrow`, `1000_2000.arrow`, … The server enforces alignment in
+two places at startup so that misaligned keys don't get added to S3:
+
+1. **Fresh cache.** If `INITIAL_BLOCK` (or current head, if unset) is
+   not a multiple of `CHUNK_SIZE`, `backfillFloor` is rounded **down**
+   to the chunk boundary. The startup backfill loop fills the small
+   pre-`startFrom` range from S3 (if a prior aligned chunk exists) or
+   from RPC. Cost: at most `CHUNK_SIZE - 1` extra blocks of backfill
+   (so up to ~1000 RPC calls), one-time, only on first start. Logged
+   as `Aligning fresh-cache backfillFloor: X -> Y …`.
+2. **Warm cache** with a misaligned `pruneFloor` inherited from an
+   older server run that wrote misaligned chunks: `archiveDispatchedUpTo`
+   is rounded **up** to the next chunk boundary. The cache blocks
+   between the old `pruneFloor` and the new aligned floor are kept
+   hot until the next sweep, then pruned without producing a new
+   aligned chunk for that partial range. Logged at `WARN`. Those
+   blocks typically still exist in legacy misaligned chunks in S3
+   from the previous run; a future listing-based read index is needed
+   to recover them via the formula-based read path.
+
+If you see the alignment `WARN` at startup, your bucket has legacy
+misaligned chunks (pre-fix server runs). New writes will be clean
+going forward, but the misaligned objects in S3 are best treated as
+unreadable until the listing-index work lands.
+
 ### Memory + disk during the archive sweep
 
 Each sweep streams one chunk through to S3 — it does **not** buffer the
