@@ -37,6 +37,7 @@ public class Metrics {
     public final Histogram cacheWaitDurationSeconds;
     public final Histogram archiveUploadDurationSeconds;
     public final Histogram archiveColdReadDurationSeconds;
+    public final Histogram subscriptionBackpressureSeconds;
 
     public Metrics(CollectorRegistry registry) {
         this.ingestorHeadBlock = Gauge.build()
@@ -136,6 +137,21 @@ public class Metrics {
         this.archiveColdReadDurationSeconds = Histogram.build()
             .name("flight_archive_cold_read_duration_seconds")
             .help("Time to fetch a single block from the S3 cold tier")
+            .register(registry);
+
+        this.subscriptionBackpressureSeconds = Histogram.build()
+            .name("flight_subscription_backpressure_seconds")
+            .labelNames("dataset")
+            .buckets(
+                0.0001, 0.001, 0.01, 0.05,
+                0.1, 0.25, 0.5, 1.0,
+                2.5, 5.0, 10.0, 30.0, 60.0
+            )
+            .help(
+                "Time the subscription's producer thread parked in awaitReady "
+                + "before the gRPC stream had send window again. Observed once "
+                + "per putNext (0 on the fast path); high tail = slow consumer."
+            )
             .register(registry);
     }
 

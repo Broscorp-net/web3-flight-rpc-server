@@ -17,6 +17,15 @@ import org.apache.arrow.vector.VectorSchemaRoot;
  */
 public class SubscriptionFactory {
 
+    /**
+     * Hard cap on direct memory each subscription may hold. Sized so a single
+     * runaway client (e.g. cold replay outpacing consumption) hits a clean
+     * Arrow {@code OutOfMemoryException} instead of starving the whole pool
+     * and tripping the cgroup limit. 128 MiB is enough for one chunk's worth
+     * of in-flight Arrow buffers plus normal putNext backpressure headroom.
+     */
+    private static final long PER_SUBSCRIPTION_MEMORY_LIMIT = 128L * 1024 * 1024;
+
     private final BufferAllocator rootAllocator;
     private final Converter converter;
     private final ExecutorService executor;
@@ -47,7 +56,7 @@ public class SubscriptionFactory {
         BufferAllocator subAllocator = rootAllocator.newChildAllocator(
             "log-sub-" + System.nanoTime(),
             0,
-            Long.MAX_VALUE
+            PER_SUBSCRIPTION_MEMORY_LIMIT
         );
         return new SequentialLogSubscription(
             listener,
@@ -68,7 +77,7 @@ public class SubscriptionFactory {
         BufferAllocator subAllocator = rootAllocator.newChildAllocator(
             "block-sub-" + System.nanoTime(),
             0,
-            Long.MAX_VALUE
+            PER_SUBSCRIPTION_MEMORY_LIMIT
         );
         return new SequentialBlockSubscription(
             listener,

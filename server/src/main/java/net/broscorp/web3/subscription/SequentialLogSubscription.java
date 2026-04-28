@@ -85,7 +85,7 @@ public class SequentialLogSubscription
             }
         }
         root.setRowCount(matchingIndices.size());
-        listener.putNext();
+        putNextTimed();
         metrics.subscriptionBatchesSentTotal.labels(datasetName()).inc();
         root.clear();
     }

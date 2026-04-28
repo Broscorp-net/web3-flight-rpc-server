@@ -61,7 +61,7 @@ public class SequentialBlockSubscription
             }
         }
         root.setRowCount(rows);
-        listener.putNext();
+        putNextTimed();
         metrics.subscriptionBatchesSentTotal.labels(datasetName()).inc();
         root.clear();
     }
