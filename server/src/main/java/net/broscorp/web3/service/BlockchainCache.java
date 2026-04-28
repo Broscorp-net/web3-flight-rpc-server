@@ -9,6 +9,9 @@ import java.util.concurrent.locks.ReentrantLock;
 import io.prometheus.client.Histogram;
 import lombok.extern.slf4j.Slf4j;
 import net.broscorp.web3.metrics.Metrics;
+import org.rocksdb.BlockBasedTableConfig;
+import org.rocksdb.Cache;
+import org.rocksdb.LRUCache;
 import org.rocksdb.Options;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -56,7 +59,23 @@ public class BlockchainCache implements AutoCloseable {
     private static final byte[] META_FORWARD_START =
         "META/forwardStart".getBytes();
 
+    /**
+     * Block cache size. Caps data blocks, index blocks and filter blocks
+     * (the latter two enabled via {@code cacheIndexAndFilterBlocks}) so
+     * RocksDB's read-side native memory cannot grow unbounded with the
+     * SST file count.
+     */
+    private static final long BLOCK_CACHE_BYTES = 32L * 1024 * 1024;
+
+    /** Per-memtable size; total memtable memory is this × {@link #MAX_WRITE_BUFFERS}. */
+    private static final long WRITE_BUFFER_BYTES = 32L * 1024 * 1024;
+
+    /** Active + immutable memtables held in memory. */
+    private static final int MAX_WRITE_BUFFERS = 2;
+
     private final RocksDB db;
+    private final Options options;
+    private final Cache blockCache;
     private final Metrics metrics;
     private final Lock lock = new ReentrantLock();
     private final Condition blockAvailable = lock.newCondition();
@@ -70,7 +89,22 @@ public class BlockchainCache implements AutoCloseable {
             dir.mkdirs();
         }
 
-        Options options = new Options().setCreateIfMissing(true);
+        this.blockCache = new LRUCache(BLOCK_CACHE_BYTES);
+        BlockBasedTableConfig tableConfig = new BlockBasedTableConfig()
+            .setBlockCache(blockCache)
+            // Without this, index + filter blocks live in a separate
+            // unbounded native arena that grows with SST count. Pulling them
+            // into the LRU cache makes BLOCK_CACHE_BYTES the true read-side
+            // ceiling.
+            .setCacheIndexAndFilterBlocks(true)
+            .setPinL0FilterAndIndexBlocksInCache(true);
+
+        this.options = new Options()
+            .setCreateIfMissing(true)
+            .setWriteBufferSize(WRITE_BUFFER_BYTES)
+            .setMaxWriteBufferNumber(MAX_WRITE_BUFFERS)
+            .setTableFormatConfig(tableConfig);
+
         this.db = RocksDB.open(options, dbPath);
         this.metrics = metrics;
         this.lastIngestedBlock = readMetaLong(META_LAST_BLOCK, -1L);
@@ -271,5 +305,7 @@ public class BlockchainCache implements AutoCloseable {
     @Override
     public void close() {
         db.close();
+        options.close();
+        blockCache.close();
     }
 }

@@ -95,16 +95,24 @@ public abstract class SequentialSubscription<
             // Catch Throwable (not just Exception) so Errors — most importantly
             // OutOfMemoryError thrown by Netty/Arrow on direct-memory exhaustion
             // — surface to the client as a real gRPC error instead of vanishing
-            // into a silent stream. Errors are still re-thrown after notifying
-            // the client so JVM-level handlers (e.g. -XX:+ExitOnOutOfMemoryError)
-            // can fire.
+            // into a silent stream.
             metrics.subscriptionErrorsTotal.labels(datasetName()).inc();
             log.error("Error in sequential subscription loop", t);
             try {
                 listener.error(t);
             } catch (Throwable ignore) {
                 // Listener may itself fail when out of memory; we've done our
-                // bookkeeping and re-raise of the original happens below.
+                // bookkeeping and the halt below still runs.
+            }
+            if (t instanceof OutOfMemoryError) {
+                // -XX:+ExitOnOutOfMemoryError covers heap OOMs raised by the VM
+                // but NOT direct-buffer OOMs thrown from java.nio.Bits in Java
+                // code, and a re-throw here is swallowed by the virtual thread's
+                // default uncaught handler. Halt explicitly so the container
+                // restarts clean instead of leaking a pinned Netty pool until
+                // the cgroup OOMKills us.
+                log.error("OutOfMemoryError — halting JVM for clean restart");
+                Runtime.getRuntime().halt(137);
             }
             if (t instanceof Error) throw (Error) t;
         } finally {
