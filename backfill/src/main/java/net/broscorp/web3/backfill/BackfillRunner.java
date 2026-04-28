@@ -65,10 +65,19 @@ public final class BackfillRunner {
         boolean skipExisting = boolEnvOr("BACKFILL_SKIP_EXISTING", true);
         double maxRps = doubleEnvOr("BACKFILL_MAX_RPS", 0.0);
         long chunkSize = longEnvOr("ARCHIVE_CHUNK_SIZE", ArchiveKey.DEFAULT_CHUNK_SIZE);
+        long minChunkBytesPerBlock = longEnvOr(
+            "BACKFILL_MIN_CHUNK_BYTES_PER_BLOCK", 5_000L
+        );
 
         if (chunkSize <= 0) {
             throw new IllegalArgumentException(
                 "ARCHIVE_CHUNK_SIZE must be > 0 (got " + chunkSize + ")"
+            );
+        }
+        if (minChunkBytesPerBlock < 0) {
+            throw new IllegalArgumentException(
+                "BACKFILL_MIN_CHUNK_BYTES_PER_BLOCK must be >= 0 (got "
+                    + minChunkBytesPerBlock + ")"
             );
         }
 
@@ -115,7 +124,9 @@ public final class BackfillRunner {
                     )
                 )
                 .build();
-            S3ChunkWriter writer = new S3ChunkWriter(s3, s3Bucket);
+            S3ChunkWriter writer = new S3ChunkWriter(
+                s3, s3Bucket, minChunkBytesPerBlock
+            );
             BufferAllocator allocator = new RootAllocator()
         ) {
             long runStartNs = System.nanoTime();
@@ -196,6 +207,12 @@ public final class BackfillRunner {
                 totalBlocks,
                 humanBytes(totalBytes)
             );
+            if (aborted > 0) {
+                throw new RuntimeException(
+                    "Backfill finished with " + aborted
+                        + " aborted chunk(s) — see prior log lines"
+                );
+            }
         }
     }
 
