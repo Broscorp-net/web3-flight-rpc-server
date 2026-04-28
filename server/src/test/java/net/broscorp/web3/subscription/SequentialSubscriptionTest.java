@@ -69,7 +69,8 @@ class SequentialSubscriptionTest {
             return null;
         }).when(listener).putNext();
         when(listener.isCancelled()).thenReturn(false);
-        // Swallow start(...) and error(...) no-ops left to Mockito default.
+        when(listener.isReady()).thenReturn(true);
+        // Swallow start(...), setOnReadyHandler(...), error(...) no-ops left to Mockito default.
         return new ListenerFixture(listener, putNextCalls, lastRowCount);
     }
 
