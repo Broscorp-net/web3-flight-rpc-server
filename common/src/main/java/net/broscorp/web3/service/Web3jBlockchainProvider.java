@@ -32,7 +32,10 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
         return web3j
             .ethBlockNumber()
             .sendAsync()
-            .thenApply(res -> res.getBlockNumber());
+            .thenApply(res -> {
+                checkRpcError("eth_blockNumber", res);
+                return res.getBlockNumber();
+            });
     }
 
     @Override
@@ -59,42 +62,88 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
             ethGetBlockReceipts(blockNumber).sendAsync();
 
         return CompletableFuture.allOf(blockFuture, logsFuture, receiptsFuture)
-            .thenApply(v -> {
-                EthBlock blockRes = blockFuture.join();
-                EthLog logsRes = logsFuture.join();
-                EthBlockReceipts receiptsRes = receiptsFuture.join();
+            .thenApply(v ->
+                assembleFullBlockData(
+                    blockNumber,
+                    blockFuture.join(),
+                    logsFuture.join(),
+                    receiptsFuture.join()
+                )
+            );
+    }
 
-                if (blockRes.getBlock() == null) {
-                    throw new RuntimeException(
-                        "Block " + blockNumber + " not found"
-                    );
-                }
+    /**
+     * Validates the three RPC responses for a block fetch and assembles them
+     * into a {@link FullBlockData}. Fails loudly on JSON-RPC errors,
+     * null-result-without-error, and receipts/transactions count mismatches —
+     * see {@code BackfillRunner} bug investigation 2026-04-28 for context.
+     */
+    static FullBlockData assembleFullBlockData(
+        BigInteger blockNumber,
+        EthBlock blockRes,
+        EthLog logsRes,
+        EthBlockReceipts receiptsRes
+    ) {
+        checkRpcError("eth_getBlockByNumber", blockRes);
+        checkRpcError("eth_getLogs", logsRes);
+        checkRpcError("eth_getBlockReceipts", receiptsRes);
 
-                List<org.web3j.protocol.core.methods.response.Log> logs =
-                    logsRes
-                        .getLogs()
-                        .stream()
-                        .map(l ->
-                            (org.web3j.protocol.core.methods.response.Log) l.get()
-                        )
-                        .toList();
+        EthBlock.Block block = blockRes.getBlock();
+        if (block == null) {
+            throw new MalformedRpcResponseException(
+                "eth_getBlockByNumber for block " + blockNumber
+                    + " returned no result and no error"
+            );
+        }
 
-                List<ExtendedTransactionReceipt> receiptList =
-                    receiptsRes.getBlockReceipts();
-                Map<String, ExtendedTransactionReceipt> receipts =
-                    receiptList == null
-                        ? Collections.emptyMap()
-                        : receiptList
-                            .stream()
-                            .collect(
-                                Collectors.toMap(
-                                    ExtendedTransactionReceipt::getTransactionHash,
-                                    r -> r
-                                )
-                            );
+        if (logsRes.getLogs() == null) {
+            throw new MalformedRpcResponseException(
+                "eth_getLogs for block " + blockNumber
+                    + " returned no result and no error"
+            );
+        }
+        List<org.web3j.protocol.core.methods.response.Log> logs = logsRes
+            .getLogs()
+            .stream()
+            .map(l -> (org.web3j.protocol.core.methods.response.Log) l.get())
+            .toList();
 
-                return new FullBlockData(blockRes.getBlock(), logs, receipts);
-            });
+        List<ExtendedTransactionReceipt> receiptList = receiptsRes
+            .getBlockReceipts();
+        if (receiptList == null) {
+            throw new MalformedRpcResponseException(
+                "eth_getBlockReceipts for block " + blockNumber
+                    + " returned no result and no error"
+            );
+        }
+
+        int txCount = block.getTransactions().size();
+        if (receiptList.size() != txCount) {
+            throw new MalformedRpcResponseException(
+                "Block " + blockNumber + " receipts/transactions mismatch: "
+                    + "block has " + txCount + " txs but received "
+                    + receiptList.size() + " receipts "
+                    + "(likely partial/error response from upstream node)"
+            );
+        }
+
+        Map<String, ExtendedTransactionReceipt> receipts = receiptList
+            .stream()
+            .collect(
+                Collectors.toMap(
+                    ExtendedTransactionReceipt::getTransactionHash,
+                    r -> r
+                )
+            );
+
+        return new FullBlockData(block, logs, receipts);
+    }
+
+    private static void checkRpcError(String method, Response<?> response) {
+        if (response.hasError()) {
+            Response.Error err = response.getError();
+            throw new JsonRpcException(method, err.getCode(), err.getMessage());
+        }
     }
 
     private Request<?, EthBlockReceipts> ethGetBlockReceipts(
