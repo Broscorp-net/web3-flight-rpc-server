@@ -20,6 +20,7 @@ import net.broscorp.web3.backfill.source.RpcBlockSource.RetryPolicy;
 import net.broscorp.web3.service.BlockchainProvider;
 import net.broscorp.web3.service.BlockchainProvider.FullBlockData;
 import net.broscorp.web3.service.JsonRpcException;
+import net.broscorp.web3.service.MalformedRpcResponseException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -149,12 +150,28 @@ class RpcBlockSourceTest {
     }
 
     @Test
-    void isTransient_doesNotRetryOnInvariantViolations() {
+    void isTransient_classifiesMalformedRpcResponseAsTransient() {
+        // Real-world case 2026-04-29: block reported 139 txs, upstream returned
+        // 0 receipts. Not a permanent error — the next attempt typically wins.
         assertThat(
             RpcBlockSource.isTransient(
-                new IllegalStateException(
+                new MalformedRpcResponseException(
                     "Block 1 receipts/transactions mismatch: ..."
                 )
+            )
+        ).isTrue();
+    }
+
+    @Test
+    void isTransient_doesNotRetryProgrammingErrors() {
+        assertThat(
+            RpcBlockSource.isTransient(
+                new IllegalArgumentException("invalid argument")
+            )
+        ).isFalse();
+        assertThat(
+            RpcBlockSource.isTransient(
+                new NullPointerException("npe in caller")
             )
         ).isFalse();
     }
@@ -262,9 +279,7 @@ class RpcBlockSourceTest {
             ) {
                 calls.incrementAndGet();
                 return CompletableFuture.failedFuture(
-                    new IllegalStateException(
-                        "Block 1 receipts/transactions mismatch: ..."
-                    )
+                    new IllegalArgumentException("bad argument")
                 );
             }
         };
@@ -279,8 +294,56 @@ class RpcBlockSourceTest {
         ) {
             assertThatThrownBy(() ->
                 source.fetchBlock(42L).get(2, TimeUnit.SECONDS)
-            ).hasRootCauseInstanceOf(IllegalStateException.class);
+            ).hasRootCauseInstanceOf(IllegalArgumentException.class);
             assertThat(calls.get()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void retry_recoversFromReceiptsCountMismatch() throws Exception {
+        // The exact case that fired in prod 2026-04-29 — the first attempt
+        // hits an upstream node returning truncated receipts, the second
+        // succeeds.
+        AtomicInteger calls = new AtomicInteger();
+        FullBlockData expected = new FullBlockData(
+            null, Collections.emptyList(), Collections.emptyMap()
+        );
+        BlockchainProvider provider = new BlockchainProvider() {
+            @Override
+            public CompletableFuture<BigInteger> getLatestBlockNumber() {
+                return CompletableFuture.completedFuture(BigInteger.ZERO);
+            }
+
+            @Override
+            public CompletableFuture<FullBlockData> fetchFullBlock(
+                BigInteger blockNumber
+            ) {
+                int n = calls.incrementAndGet();
+                if (n == 1) {
+                    return CompletableFuture.failedFuture(
+                        new MalformedRpcResponseException(
+                            "Block " + blockNumber
+                                + " receipts/transactions mismatch:"
+                                + " block has 139 txs but received 0 receipts"
+                        )
+                    );
+                }
+                return CompletableFuture.completedFuture(expected);
+            }
+        };
+
+        try (
+            RpcBlockSource source = new RpcBlockSource(
+                provider,
+                null,
+                new RetryPolicy(4, 1L, 5L),
+                scheduler
+            )
+        ) {
+            FullBlockData got = source.fetchBlock(45198695L)
+                .get(2, TimeUnit.SECONDS);
+            assertThat(got).isSameAs(expected);
+            assertThat(calls.get()).isEqualTo(2);
         }
     }
 }

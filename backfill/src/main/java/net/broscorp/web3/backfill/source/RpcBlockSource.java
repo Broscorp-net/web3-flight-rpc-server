@@ -16,6 +16,7 @@ import net.broscorp.web3.backfill.ratelimit.TokenBucket;
 import net.broscorp.web3.service.BlockchainProvider;
 import net.broscorp.web3.service.BlockchainProvider.FullBlockData;
 import net.broscorp.web3.service.JsonRpcException;
+import net.broscorp.web3.service.MalformedRpcResponseException;
 import net.broscorp.web3.service.Web3jBlockchainProvider;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.exceptions.ClientConnectionException;
@@ -173,6 +174,9 @@ public class RpcBlockSource implements BlockSource {
     }
 
     static boolean isTransient(Throwable cause) {
+        // Structurally-valid response whose payload is incoherent — empirically
+        // the upstream node truncated/dropped the body under load. Retry.
+        if (cause instanceof MalformedRpcResponseException) return true;
         if (cause instanceof JsonRpcException jre) {
             int code = jre.code();
             // -32005: Alchemy/Infura "limit exceeded".

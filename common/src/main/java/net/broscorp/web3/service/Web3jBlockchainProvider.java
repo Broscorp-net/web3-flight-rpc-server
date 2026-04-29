@@ -90,14 +90,14 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
 
         EthBlock.Block block = blockRes.getBlock();
         if (block == null) {
-            throw new IllegalStateException(
+            throw new MalformedRpcResponseException(
                 "eth_getBlockByNumber for block " + blockNumber
                     + " returned no result and no error"
             );
         }
 
         if (logsRes.getLogs() == null) {
-            throw new IllegalStateException(
+            throw new MalformedRpcResponseException(
                 "eth_getLogs for block " + blockNumber
                     + " returned no result and no error"
             );
@@ -111,7 +111,7 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
         List<ExtendedTransactionReceipt> receiptList = receiptsRes
             .getBlockReceipts();
         if (receiptList == null) {
-            throw new IllegalStateException(
+            throw new MalformedRpcResponseException(
                 "eth_getBlockReceipts for block " + blockNumber
                     + " returned no result and no error"
             );
@@ -119,7 +119,7 @@ public class Web3jBlockchainProvider implements BlockchainProvider {
 
         int txCount = block.getTransactions().size();
         if (receiptList.size() != txCount) {
-            throw new IllegalStateException(
+            throw new MalformedRpcResponseException(
                 "Block " + blockNumber + " receipts/transactions mismatch: "
                     + "block has " + txCount + " txs but received "
                     + receiptList.size() + " receipts "

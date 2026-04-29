@@ -74,7 +74,7 @@ class Web3jBlockchainProviderTest {
                 BigInteger.valueOf(42L), blockRes, okLogs(), okReceipts(0)
             )
         )
-            .isInstanceOf(IllegalStateException.class)
+            .isInstanceOf(MalformedRpcResponseException.class)
             .hasMessageContaining("eth_getBlockByNumber for block 42");
     }
 
@@ -87,7 +87,7 @@ class Web3jBlockchainProviderTest {
                 BigInteger.valueOf(42L), okBlock(0), logsRes, okReceipts(0)
             )
         )
-            .isInstanceOf(IllegalStateException.class)
+            .isInstanceOf(MalformedRpcResponseException.class)
             .hasMessageContaining("eth_getLogs for block 42");
     }
 
@@ -100,7 +100,7 @@ class Web3jBlockchainProviderTest {
                 BigInteger.valueOf(42L), okBlock(0), okLogs(), receiptsRes
             )
         )
-            .isInstanceOf(IllegalStateException.class)
+            .isInstanceOf(MalformedRpcResponseException.class)
             .hasMessageContaining("eth_getBlockReceipts for block 42");
     }
 
@@ -115,7 +115,7 @@ class Web3jBlockchainProviderTest {
                 BigInteger.valueOf(42L), blockRes, okLogs(), okReceipts(1)
             )
         )
-            .isInstanceOf(IllegalStateException.class)
+            .isInstanceOf(MalformedRpcResponseException.class)
             .hasMessageContaining("receipts/transactions mismatch")
             .hasMessageContaining("3 txs")
             .hasMessageContaining("1 receipts");
