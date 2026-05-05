@@ -74,6 +74,7 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 |---|---|---|
 | `DB_PATH` | `rocksdb_cache` | RocksDB directory. **Must point at persistent storage** for the cache to survive restarts. Anything ephemeral means RPC re-backfill on every restart. |
 | `INITIAL_BLOCK` | (latest head) | Starting block for a **fresh cache only**. Ignored on warm restart — resume always continues from `lastIngestedBlock + 1`. |
+| `FORCE_INITIAL_BLOCK` | `false` | On a warm cache, fast-forward meta to `INITIAL_BLOCK` if the cache is behind it (`INITIAL_BLOCK > lastIngestedBlock + 1`). Idempotent: once the cache catches up, the flag is a no-op, so it's safe to leave set across k8s restarts. Non-destructive — no cached data is deleted; entries below the new `pruneFloor` simply become unreachable through `getOrWait` (returned as `PRUNED`). Use to skip past a broken-data range in the upstream RPC. Ignored on a fresh cache (use `INITIAL_BLOCK` alone). |
 | `BACKFILL_BLOCKS` | `0` | On a fresh cache only, also fill the previous N blocks backward into the hot cache. Reads from S3 archive first (if configured), falls back to RPC on miss. Ignored on warm restart. |
 
 ### Retention + cold tier
@@ -286,6 +287,23 @@ previous run). On warm restart (persistent storage retains the DB):
 
 This is intentional: warm restart is **the cheap path**, and it shouldn't
 re-do backfill work just because you redeployed with the same env.
+
+The escape hatch is `FORCE_INITIAL_BLOCK=true`. With it set, on warm
+restart the server compares `INITIAL_BLOCK` against `lastIngestedBlock +
+1`:
+
+- If `INITIAL_BLOCK` is **greater**, meta is fast-forwarded
+  (`lastIngestedBlock = INITIAL_BLOCK - 1`, `pruneFloor` ratchets up to
+  `INITIAL_BLOCK`, `forwardStart = INITIAL_BLOCK`) and forward ingestion
+  continues from there. Cached blocks below the new `pruneFloor` stay on
+  disk but become unreachable via `getOrWait`; reclaim space later with a
+  manual prune if needed.
+- If `INITIAL_BLOCK` is **at or below** the resume point, the flag is a
+  no-op (the cache is already past it).
+
+So the flag is **idempotent** — safe to leave set in a k8s manifest. Use
+it when an upstream RPC has a broken/missing data range and you want to
+skip past it without wiping the cache.
 
 ### 3. `BACKFILL_BLOCKS` is the cheap way to make a server "remember" history
 

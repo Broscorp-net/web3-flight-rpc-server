@@ -168,6 +168,24 @@ public class BlockchainIngestor implements AutoCloseable {
         long backfillBlocks,
         long archiveChunkSize
     ) throws RocksDBException {
+        start(
+            initialBlock,
+            retentionBlocks,
+            archiveManager,
+            backfillBlocks,
+            archiveChunkSize,
+            false
+        );
+    }
+
+    public void start(
+        Long initialBlock,
+        Long retentionBlocks,
+        ArchiveManager archiveManager,
+        long backfillBlocks,
+        long archiveChunkSize,
+        boolean forceInitialBlock
+    ) throws RocksDBException {
         if (archiveChunkSize <= 0) {
             throw new IllegalArgumentException(
                 "archiveChunkSize must be positive: " + archiveChunkSize
@@ -179,6 +197,33 @@ public class BlockchainIngestor implements AutoCloseable {
 
         boolean freshCache = cache.getLastIngestedBlock() < 0;
         long resumeFrom = cache.getLastIngestedBlock() + 1;
+
+        if (forceInitialBlock) {
+            if (initialBlock == null) {
+                log.warn(
+                    "FORCE_INITIAL_BLOCK=true ignored: INITIAL_BLOCK is not set"
+                );
+            } else if (!freshCache && initialBlock > resumeFrom) {
+                log.warn(
+                    "FORCE_INITIAL_BLOCK=true: fast-forwarding cache from "
+                        + "lastIngestedBlock+1={} to INITIAL_BLOCK={}",
+                    resumeFrom,
+                    initialBlock
+                );
+                cache.fastForwardTo(initialBlock);
+                resumeFrom = initialBlock;
+            } else if (!freshCache) {
+                log.info(
+                    "FORCE_INITIAL_BLOCK=true ignored: lastIngestedBlock+1={} >= "
+                        + "INITIAL_BLOCK={}",
+                    resumeFrom,
+                    initialBlock
+                );
+            }
+            // freshCache + initialBlock set: nothing to fast-forward; the
+            // normal fresh-cache path below uses initialBlock as startFrom.
+        }
+
         long startFrom;
         if (freshCache) {
             startFrom = (initialBlock != null)

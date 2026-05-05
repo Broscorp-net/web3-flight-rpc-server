@@ -58,6 +58,9 @@ public class FlightRpcServer {
         String ethereumNodeUrl = System.getenv("WEBSOCKET_NODE_URL");
         String ethereumNodeHttpUrl = System.getenv("HTTP_NODE_URL");
         String initialBlockString = System.getenv("INITIAL_BLOCK");
+        boolean forceInitialBlock = parseBool(
+            System.getenv("FORCE_INITIAL_BLOCK"), false
+        );
         String retentionBlocksString = System.getenv("RETENTION_BLOCKS");
         String backfillBlocksString = System.getenv("BACKFILL_BLOCKS");
         String chunkSizeString = System.getenv("ARCHIVE_CHUNK_SIZE");
@@ -197,6 +200,7 @@ public class FlightRpcServer {
                 web3HttpService,
                 metrics,
                 initialBlock,
+                forceInitialBlock,
                 retentionBlocks,
                 backfillBlocks,
                 archiveChunkSize,
@@ -228,6 +232,7 @@ public class FlightRpcServer {
         org.web3j.protocol.Web3jService web3HttpService,
         Metrics metrics,
         Long initialBlock,
+        boolean forceInitialBlock,
         Long retentionBlocks,
         long backfillBlocks,
         long archiveChunkSize,
@@ -295,7 +300,8 @@ public class FlightRpcServer {
                     retentionBlocks,
                     archiveManager,
                     backfillBlocks,
-                    archiveChunkSize
+                    archiveChunkSize,
+                    forceInitialBlock
                 );
 
                 SubscriptionFactory subscriptionFactory = new SubscriptionFactory(

@@ -164,6 +164,53 @@ public class BlockchainCache implements AutoCloseable {
     }
 
     /**
+     * Advances cache meta to anchor at {@code block} without deleting any
+     * cached block/log bytes: sets {@code lastIngestedBlock = block - 1},
+     * ratchets {@code pruneFloor} forward to {@code max(pruneFloor, block)},
+     * and sets {@code forwardStart = block}. Cached entries below the new
+     * pruneFloor remain on disk but are reported as {@link Status#PRUNED} by
+     * {@link #getOrWait}; reclaim them later with an explicit {@link #prune}
+     * call if disk pressure is a concern.
+     *
+     * <p>Only ever moves state forward — caller must ensure
+     * {@code block > lastIngestedBlock + 1}.
+     */
+    public void fastForwardTo(long block) throws RocksDBException {
+        if (block <= lastIngestedBlock + 1) {
+            throw new IllegalArgumentException(
+                "fastForwardTo(" + block + ") would not advance state; "
+                    + "lastIngestedBlock=" + lastIngestedBlock
+            );
+        }
+        long newPruneFloor = Math.max(pruneFloor, block);
+        log.warn(
+            "Fast-forwarding cache meta: lastIngestedBlock={} -> {}, "
+                + "pruneFloor={} -> {}, forwardStart={} -> {}. "
+                + "Cached data below pruneFloor remains on disk but is unreachable.",
+            lastIngestedBlock, block - 1,
+            pruneFloor, newPruneFloor,
+            forwardStart, block
+        );
+        try (WriteBatch batch = new WriteBatch(); WriteOptions opts = new WriteOptions()) {
+            batch.put(META_LAST_BLOCK, encodeLong(block - 1));
+            batch.put(META_PRUNE_FLOOR, encodeLong(newPruneFloor));
+            batch.put(META_FORWARD_START, encodeLong(block));
+            db.write(opts, batch);
+        }
+        lock.lock();
+        try {
+            lastIngestedBlock = block - 1;
+            pruneFloor = newPruneFloor;
+            forwardStart = block;
+            blockAvailable.signalAll();
+        } finally {
+            lock.unlock();
+        }
+        metrics.ingestorCommittedBlock.set(lastIngestedBlock);
+        metrics.cachePruneFloor.set(pruneFloor);
+    }
+
+    /**
      * Sets the forward-ingestion start boundary. Blocks in
      * {@code [pruneFloor, forwardStart)} that are not yet present are reported
      * as {@link Status#BACKFILLING} (not waited on); blocks {@code >=

@@ -100,6 +100,92 @@ class BlockchainIngestorTest {
         }
     }
 
+    @Test
+    void forceInitialBlock_fastForwardsWarmCache() throws Exception {
+        // Warm cache at lastIngestedBlock=2; pretend chain head is below the
+        // forced start so the dispatcher can't progress and we observe
+        // post-fast-forward meta cleanly.
+        cache.commit(1, new byte[] { 1 }, new byte[] { 9 });
+        cache.commit(2, new byte[] { 2 }, new byte[] { 8 });
+        assertThat(cache.getLastIngestedBlock()).isEqualTo(2);
+
+        BlockchainProvider provider = new BlockchainProvider() {
+            @Override
+            public CompletableFuture<BigInteger> getLatestBlockNumber() {
+                return CompletableFuture.completedFuture(BigInteger.valueOf(9));
+            }
+
+            @Override
+            public CompletableFuture<FullBlockData> fetchFullBlock(
+                BigInteger blockNumber
+            ) {
+                return new CompletableFuture<>();
+            }
+        };
+
+        BlockchainIngestor ingestor = new BlockchainIngestor(
+            provider, cache, converter, allocator, web3jMock, null, metrics, 1
+        );
+        try {
+            ingestor.start(
+                10L,
+                null,
+                null,
+                BlockchainIngestor.DEFAULT_BACKFILL_BLOCKS,
+                net.broscorp.web3.archive.ArchiveKey.DEFAULT_CHUNK_SIZE,
+                true
+            );
+
+            assertThat(cache.getLastIngestedBlock()).isEqualTo(9);
+            assertThat(cache.getPruneFloor()).isEqualTo(10);
+            assertThat(cache.getForwardStart()).isEqualTo(10);
+        } finally {
+            ingestor.close();
+        }
+    }
+
+    @Test
+    void forceInitialBlock_isNoopWhenCacheAlreadyPastInitialBlock()
+        throws Exception {
+        cache.commit(1, new byte[] { 1 }, new byte[] { 9 });
+        cache.commit(2, new byte[] { 2 }, new byte[] { 8 });
+        cache.commit(3, new byte[] { 3 }, new byte[] { 7 });
+
+        BlockchainProvider provider = new BlockchainProvider() {
+            @Override
+            public CompletableFuture<BigInteger> getLatestBlockNumber() {
+                return CompletableFuture.completedFuture(BigInteger.valueOf(3));
+            }
+
+            @Override
+            public CompletableFuture<FullBlockData> fetchFullBlock(
+                BigInteger blockNumber
+            ) {
+                return new CompletableFuture<>();
+            }
+        };
+
+        BlockchainIngestor ingestor = new BlockchainIngestor(
+            provider, cache, converter, allocator, web3jMock, null, metrics, 1
+        );
+        try {
+            // initialBlock=2 but resumeFrom=4 (>= 2): flag is a no-op.
+            ingestor.start(
+                2L,
+                null,
+                null,
+                BlockchainIngestor.DEFAULT_BACKFILL_BLOCKS,
+                net.broscorp.web3.archive.ArchiveKey.DEFAULT_CHUNK_SIZE,
+                true
+            );
+
+            assertThat(cache.getLastIngestedBlock()).isEqualTo(3);
+            assertThat(cache.getPruneFloor()).isEqualTo(0);
+        } finally {
+            ingestor.close();
+        }
+    }
+
     private void awaitUntil(java.util.function.BooleanSupplier cond, long timeoutMs)
         throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
