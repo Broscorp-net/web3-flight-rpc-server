@@ -2,6 +2,7 @@ package net.broscorp.web3.server;
 
 import io.prometheus.client.exporter.HTTPServer;
 import io.prometheus.client.hotspot.DefaultExports;
+import java.net.URI;
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +66,10 @@ public class FlightRpcServer {
         String archiveModeString = System.getenv("ARCHIVE_MODE");
         String s3Bucket = System.getenv("S3_BUCKET");
         String s3Region = System.getenv("S3_REGION");
+        String s3Endpoint = System.getenv("S3_ENDPOINT");
+        boolean s3ForcePathStyle = parseBool(
+            System.getenv("S3_FORCE_PATH_STYLE"), false
+        );
         String awsAccessKey = System.getenv("AWS_ACCESS_KEY");
         String awsSecretKey = System.getenv("AWS_SECRET_KEY");
 
@@ -197,6 +202,8 @@ public class FlightRpcServer {
                 archiveChunkSize,
                 useS3 ? s3Bucket : null,
                 s3Region,
+                s3Endpoint,
+                s3ForcePathStyle,
                 awsAccessKey,
                 awsSecretKey
             );
@@ -226,6 +233,8 @@ public class FlightRpcServer {
         long archiveChunkSize,
         String s3Bucket,
         String s3Region,
+        String s3Endpoint,
+        boolean s3ForcePathStyle,
         String awsAccessKey,
         String awsSecretKey
     ) throws Exception {
@@ -239,20 +248,31 @@ public class FlightRpcServer {
         ArchiveManager archiveManager = null;
         try {
             if (s3Bucket != null) {
-                S3Client s3 = S3Client.builder()
+                var s3Builder = S3Client.builder()
                     .region(Region.of(s3Region != null ? s3Region : "us-east-1"))
                     .credentialsProvider(
                         StaticCredentialsProvider.create(
                             AwsBasicCredentials.create(awsAccessKey, awsSecretKey)
                         )
                     )
-                    .build();
+                    .forcePathStyle(s3ForcePathStyle);
+                if (s3Endpoint != null && !s3Endpoint.isBlank()) {
+                    s3Builder.endpointOverride(URI.create(s3Endpoint));
+                }
+                S3Client s3 = s3Builder.build();
                 s3ArchiveManager = new S3ArchiveManager(
                     s3, s3Bucket, cache, converter, archiveAllocator, metrics,
                     Duration.ofMinutes(10)
                 );
                 archiveManager = s3ArchiveManager;
-                log.info("S3 archiving enabled for bucket: {}", s3Bucket);
+                log.info(
+                    "S3 archiving enabled for bucket: {}{}{}",
+                    s3Bucket,
+                    s3Endpoint != null && !s3Endpoint.isBlank()
+                        ? " (endpoint=" + s3Endpoint + ")"
+                        : "",
+                    s3ForcePathStyle ? " (path-style)" : ""
+                );
             }
 
             Web3jBlockchainProvider provider = new Web3jBlockchainProvider(
@@ -307,5 +327,16 @@ public class FlightRpcServer {
             archiveAllocator.close();
             ingestorAllocator.close();
         }
+    }
+
+    private static boolean parseBool(String raw, boolean fallback) {
+        if (raw == null || raw.isBlank()) return fallback;
+        return switch (raw.trim().toLowerCase()) {
+            case "true", "1", "yes" -> true;
+            case "false", "0", "no" -> false;
+            default -> throw new IllegalArgumentException(
+                "Invalid boolean value: " + raw
+            );
+        };
     }
 }

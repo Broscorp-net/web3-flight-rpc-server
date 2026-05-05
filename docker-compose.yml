@@ -58,6 +58,11 @@ services:
       # - S3_REGION=us-east-1
       # - AWS_ACCESS_KEY=...
       # - AWS_SECRET_KEY=...
+      # S3_ENDPOINT / S3_FORCE_PATH_STYLE: set when targeting an
+      # S3-compatible backend like Cloudflare R2 or Minio. Both server and
+      # backfill must use identical values.
+      # - S3_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com  # R2
+      # - S3_FORCE_PATH_STYLE=true                                   # Minio
     volumes:
       - rocksdb_data:/app/rocksdb_cache
     networks:

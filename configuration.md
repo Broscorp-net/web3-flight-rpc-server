@@ -84,9 +84,11 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 | `ARCHIVE_CHUNK_SIZE` | `1000` | Size in blocks of each archive chunk written to S3. Must match across writers (server + backfill) for the cleanest layout, but the read-side index tolerates mixed sizes if it changes between runs. Must be `> 0`. |
 | `ARCHIVE_MODE` | `optional` | `off` / `optional` / `required`. See "Archive modes" below. |
 | `S3_BUCKET` | — | Bucket name. Accepts `bucket` or `bucket/prefix`. **Must match the backfill's `S3_BUCKET`** so cold reads find the back-filled chunks. |
-| `S3_REGION` | `us-east-1` | AWS region. |
-| `AWS_ACCESS_KEY` | — | Required if S3 is in use. |
-| `AWS_SECRET_KEY` | — | Required if S3 is in use. |
+| `S3_REGION` | `us-east-1` | AWS region. For S3-compatible providers that don't use regions (R2, Minio), set to `auto` or any non-empty value. |
+| `S3_ENDPOINT` | — | Optional override URL for S3-compatible services (Cloudflare R2, Minio, LocalStack). Leave unset for AWS S3. |
+| `S3_FORCE_PATH_STYLE` | `false` | Use path-style URLs (`https://host/bucket/key`) instead of virtual-hosted (`https://bucket.host/key`). Set `true` for Minio and most local S3 emulators; leave `false` for AWS S3 and R2. |
+| `AWS_ACCESS_KEY` | — | Required if S3 is in use. For R2, use the R2 Access Key ID; for Minio, the configured access key. |
+| `AWS_SECRET_KEY` | — | Required if S3 is in use. For R2, use the R2 Secret Access Key; for Minio, the configured secret key. |
 
 ### Archive modes
 
@@ -221,7 +223,9 @@ tracked as a follow-up.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `S3_REGION` | `us-east-1` | |
+| `S3_REGION` | `us-east-1` | For non-AWS providers (R2, Minio), use `auto` or any non-empty value. **Must match the server's `S3_REGION`** when using a custom endpoint that signs by region. |
+| `S3_ENDPOINT` | — | Optional override URL for S3-compatible services (Cloudflare R2, Minio, LocalStack). **Must match the server's `S3_ENDPOINT`** so both write to the same backend. |
+| `S3_FORCE_PATH_STYLE` | `false` | Use path-style URLs. Set `true` for Minio and most local S3 emulators. **Must match the server's value.** |
 | `ARCHIVE_CHUNK_SIZE` | `1000` | Chunk size in blocks. Should match the running server's value for a clean shared layout; mismatched sizes still work because the read index handles variable-size chunks. Must be `> 0`. |
 
 ### Memory
@@ -407,3 +411,44 @@ After both run:
 - Anything below `head - BACKFILL_BLOCKS` is queryable via cold-tier reads
   to S3.
 - Restarts re-use the persistent cache; no RPC re-fetch.
+
+---
+
+## S3-compatible backends (R2, Minio, etc.)
+
+The cold tier talks to anything that speaks the AWS S3 API. Both the
+server and the backfill must point at the **same** backend (matching
+`S3_BUCKET`, `S3_ENDPOINT`, `S3_REGION`, `S3_FORCE_PATH_STYLE`).
+
+**Cloudflare R2:**
+
+```env
+S3_BUCKET            = my-flight-archive/ethereum
+S3_ENDPOINT          = https://<account_id>.r2.cloudflarestorage.com
+S3_REGION            = auto
+S3_FORCE_PATH_STYLE  = false
+AWS_ACCESS_KEY       = <R2 Access Key ID>
+AWS_SECRET_KEY       = <R2 Secret Access Key>
+```
+
+R2 ignores the region but the AWS SDK requires a non-empty value; `auto`
+is the conventional placeholder. Get the endpoint and credentials from
+the R2 dashboard ("Manage R2 API Tokens").
+
+**Minio (self-hosted / dev):**
+
+```env
+S3_BUCKET            = my-flight-archive/ethereum
+S3_ENDPOINT          = http://minio:9000
+S3_REGION            = us-east-1
+S3_FORCE_PATH_STYLE  = true
+AWS_ACCESS_KEY       = minioadmin
+AWS_SECRET_KEY       = minioadmin
+```
+
+Minio defaults to path-style addressing — `S3_FORCE_PATH_STYLE=true` is
+required. Create the bucket up front (e.g. `mc mb local/my-flight-archive`);
+the server doesn't auto-create buckets.
+
+**LocalStack:** same shape as Minio (`S3_ENDPOINT=http://localstack:4566`,
+`S3_FORCE_PATH_STYLE=true`).

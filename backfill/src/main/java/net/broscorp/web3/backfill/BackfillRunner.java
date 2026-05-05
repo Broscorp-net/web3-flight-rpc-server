@@ -1,5 +1,6 @@
 package net.broscorp.web3.backfill;
 
+import java.net.URI;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -98,6 +99,8 @@ public final class BackfillRunner {
 
         String s3Bucket = requiredEnv("S3_BUCKET");
         String s3Region = envOr("S3_REGION", "us-east-1");
+        String s3Endpoint = envOr("S3_ENDPOINT", null);
+        boolean s3ForcePathStyle = boolEnvOr("S3_FORCE_PATH_STYLE", false);
         String awsAccessKey = requiredEnv("AWS_ACCESS_KEY");
         String awsSecretKey = requiredEnv("AWS_SECRET_KEY");
 
@@ -131,14 +134,9 @@ public final class BackfillRunner {
         Converter converter = new Converter();
         try (
             BlockSource source = buildSource(sourceKind, rateLimiter);
-            S3Client s3 = S3Client.builder()
-                .region(Region.of(s3Region))
-                .credentialsProvider(
-                    StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(awsAccessKey, awsSecretKey)
-                    )
-                )
-                .build();
+            S3Client s3 = buildS3Client(
+                s3Region, s3Endpoint, s3ForcePathStyle, awsAccessKey, awsSecretKey
+            );
             S3ChunkWriter writer = new S3ChunkWriter(
                 s3, s3Bucket, minChunkBytesPerBlock
             );
@@ -478,6 +476,27 @@ public final class BackfillRunner {
                 "Unknown BACKFILL_SOURCE: " + kind + " (expected rpc|bigquery)"
             );
         };
+    }
+
+    private static S3Client buildS3Client(
+        String region,
+        String endpoint,
+        boolean forcePathStyle,
+        String accessKey,
+        String secretKey
+    ) {
+        var builder = S3Client.builder()
+            .region(Region.of(region))
+            .credentialsProvider(
+                StaticCredentialsProvider.create(
+                    AwsBasicCredentials.create(accessKey, secretKey)
+                )
+            )
+            .forcePathStyle(forcePathStyle);
+        if (endpoint != null && !endpoint.isBlank()) {
+            builder.endpointOverride(URI.create(endpoint));
+        }
+        return builder.build();
     }
 
     private static String requiredEnv(String name) {
