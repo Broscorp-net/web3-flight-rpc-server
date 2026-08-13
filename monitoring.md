@@ -61,7 +61,7 @@ unless noted otherwise.
 | `flight_ingestor_blocks_committed_total` | Counter | — | Blocks successfully committed (forward + backward backfill loop). |
 | `flight_ingestor_fetch_retries_total` | Counter | — | Block-fetch retry attempts (RPC errors, exponential backoff). |
 | `flight_ingestor_commit_errors_total` | Counter | — | Failures inside the commit loop (RocksDB write or serialization). |
-| `flight_ingestor_fetch_duration_seconds` | Histogram | — | Latency of a successful full-block fetch (`eth_getBlockByNumber + eth_getLogs + eth_getBlockReceipts`). |
+| `flight_ingestor_fetch_duration_seconds` | Histogram | — | Latency of a successful full-block fetch (`eth_getBlockByNumber + eth_getBlockReceipts`, issued concurrently). |
 
 ### Hot cache (RocksDB)
 

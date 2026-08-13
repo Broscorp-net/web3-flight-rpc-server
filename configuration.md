@@ -59,7 +59,7 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 | Var | Purpose |
 |---|---|
 | `WEBSOCKET_NODE_URL` | WS endpoint for `eth_subscribe("newHeads")`. Drives forward ingestion. |
-| `HTTP_NODE_URL` | HTTP endpoint for `eth_getBlockByNumber` / `eth_getLogs` / `eth_getBlockReceipts`. |
+| `HTTP_NODE_URL` | HTTP endpoint for `eth_getBlockByNumber` / `eth_getBlockReceipts`. Requests are sent with `Accept-Encoding: gzip`. |
 
 ### Networking
 
@@ -217,7 +217,7 @@ tracked as a follow-up.
 | Var | Default | Purpose |
 |---|---|---|
 | `BACKFILL_FETCH_PARALLELISM` | `8` | Concurrent block fetches inside one chunk. Also caps per-chunk heap usage — at most this many `FullBlockData` objects are alive at once (see "Memory" below). |
-| `BACKFILL_MAX_RPS` | `0` (disabled) | Token-bucket rate limit on outgoing RPC calls. Each block fetch issues 3 calls (`eth_getBlockByNumber` + `eth_getLogs` + `eth_getBlockReceipts`), so set this to ~3× your provider's allowed RPS. `0` disables the limiter — only `BACKFILL_FETCH_PARALLELISM` throttles. |
+| `BACKFILL_MAX_RPS` | `0` (disabled) | Token-bucket rate limit on outgoing RPC calls. Each block fetch issues 2 calls (`eth_getBlockByNumber` + `eth_getBlockReceipts`), so set this to ~2× your provider's allowed RPS. `0` disables the limiter — only `BACKFILL_FETCH_PARALLELISM` throttles. |
 | `BACKFILL_SKIP_EXISTING` | `true` | Before assembling, the job does a `HEAD` against S3. If both `blocks/` and `logs/` chunks exist, the chunk is skipped. Set `false` to force re-upload. |
 
 ### S3
@@ -376,8 +376,8 @@ fall through to the RPC fallback (or fail, depending on
   `flight_archive_cold_reads_total{status="miss"}` is your indicator.
 - **Backfill against a consumer-tier RPC provider** → mass-fetch historical
   blocks will rate-limit you within minutes. Use an archive tier; set
-  `BACKFILL_MAX_RPS` to ~3× your provider's request-rate cap (each block
-  costs 3 RPC calls), and tune `BACKFILL_FETCH_PARALLELISM` for memory.
+  `BACKFILL_MAX_RPS` to ~2× your provider's request-rate cap (each block
+  costs 2 RPC calls), and tune `BACKFILL_FETCH_PARALLELISM` for memory.
 - **OOM during backfill** → drop `BACKFILL_FETCH_PARALLELISM` (caps the
   in-flight `FullBlockData` window). The chunk itself is no longer
   buffered on heap, so the only knob that affects backfill RAM is this

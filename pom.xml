@@ -107,6 +107,21 @@
             <version>5.0.0</version>
         </dependency>
 
+        <!-- Pulled in transitively by web3j core, but declared explicitly
+        because RpcHttpServiceFactory builds the JSON-RPC OkHttp client itself.
+        Keep these pinned to whatever web3j core resolves to. -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+            <version>4.3.1</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.squareup.okio</groupId>
+            <artifactId>okio</artifactId>
+            <version>2.4.1</version>
+        </dependency>
+
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>

@@ -44,12 +44,12 @@ class RpcBlockSourceTest {
     void isTransient_classifiesJsonRpcRateLimitCodes() {
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", -32005, "limit exceeded")
+                new JsonRpcException("eth_getBlockReceipts",-32005, "limit exceeded")
             )
         ).isTrue();
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", 429, "Too Many Requests")
+                new JsonRpcException("eth_getBlockReceipts",429, "Too Many Requests")
             )
         ).isTrue();
     }
@@ -58,17 +58,17 @@ class RpcBlockSourceTest {
     void isTransient_treats32603OnlyAsTransientWhenMessageIndicatesOverload() {
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", -32603, "rate limit hit")
+                new JsonRpcException("eth_getBlockReceipts",-32603, "rate limit hit")
             )
         ).isTrue();
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", -32603, "node is busy")
+                new JsonRpcException("eth_getBlockReceipts",-32603, "node is busy")
             )
         ).isTrue();
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", -32603, "internal logic error")
+                new JsonRpcException("eth_getBlockReceipts",-32603, "internal logic error")
             )
         ).isFalse();
     }
@@ -77,12 +77,12 @@ class RpcBlockSourceTest {
     void isTransient_classifiesPermanentJsonRpcCodesAsNonTransient() {
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", -32602, "invalid params")
+                new JsonRpcException("eth_getBlockReceipts",-32602, "invalid params")
             )
         ).isFalse();
         assertThat(
             RpcBlockSource.isTransient(
-                new JsonRpcException("eth_getLogs", -32601, "method not found")
+                new JsonRpcException("eth_getBlockReceipts",-32601, "method not found")
             )
         ).isFalse();
     }
@@ -208,7 +208,7 @@ class RpcBlockSourceTest {
                 int n = calls.incrementAndGet();
                 if (n < 3) {
                     return CompletableFuture.failedFuture(
-                        new JsonRpcException("eth_getLogs", -32005, "limit exceeded")
+                        new JsonRpcException("eth_getBlockReceipts",-32005, "limit exceeded")
                     );
                 }
                 return CompletableFuture.completedFuture(expected);

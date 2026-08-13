@@ -17,6 +17,7 @@ import net.broscorp.web3.service.BlockchainProvider;
 import net.broscorp.web3.service.BlockchainProvider.FullBlockData;
 import net.broscorp.web3.service.JsonRpcException;
 import net.broscorp.web3.service.MalformedRpcResponseException;
+import net.broscorp.web3.service.RpcHttpServiceFactory;
 import net.broscorp.web3.service.Web3jBlockchainProvider;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.exceptions.ClientConnectionException;
@@ -24,11 +25,11 @@ import org.web3j.protocol.http.HttpService;
 
 /**
  * {@link BlockSource} backed by the same {@link Web3jBlockchainProvider} the
- * live ingestor uses for forward fetches. Built on top of {@code eth_getBlockByNumber},
- * {@code eth_getLogs} and {@code eth_getBlockReceipts}.
+ * live ingestor uses for forward fetches. Built on top of
+ * {@code eth_getBlockByNumber} and {@code eth_getBlockReceipts}.
  *
  * <p>If a {@link TokenBucket} is provided, {@link #fetchBlock} blocks the
- * caller until 3 tokens are available (one per RPC call the provider issues
+ * caller until 2 tokens are available (one per RPC call the provider issues
  * per block). The producer thread in the orchestrator is the natural caller,
  * so blocking here throttles new fetches without affecting in-flight ones.
  *
@@ -41,7 +42,7 @@ import org.web3j.protocol.http.HttpService;
 @Slf4j
 public class RpcBlockSource implements BlockSource {
 
-    private static final int RPC_CALLS_PER_BLOCK = 3;
+    private static final int RPC_CALLS_PER_BLOCK = 2;
 
     /** Default policy: 6 total attempts, 500ms base, 30s cap. */
     public static final RetryPolicy DEFAULT_RETRY_POLICY =
@@ -66,7 +67,7 @@ public class RpcBlockSource implements BlockSource {
         TokenBucket rateLimiter,
         RetryPolicy retryPolicy
     ) {
-        this.httpService = new HttpService(httpUrl);
+        this.httpService = RpcHttpServiceFactory.create(httpUrl);
         this.web3j = Web3j.build(httpService);
         this.provider = new Web3jBlockchainProvider(web3j, httpService);
         this.rateLimiter = rateLimiter;

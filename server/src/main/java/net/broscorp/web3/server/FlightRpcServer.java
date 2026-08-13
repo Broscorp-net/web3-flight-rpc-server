@@ -14,6 +14,7 @@ import net.broscorp.web3.producer.Producer;
 import net.broscorp.web3.service.ArchiveManager;
 import net.broscorp.web3.service.BlockchainCache;
 import net.broscorp.web3.service.BlockchainIngestor;
+import net.broscorp.web3.service.RpcHttpServiceFactory;
 import net.broscorp.web3.service.S3ArchiveManager;
 import net.broscorp.web3.service.Web3jBlockchainProvider;
 import net.broscorp.web3.subscription.SubscriptionFactory;
@@ -165,7 +166,8 @@ public class FlightRpcServer {
             System.exit(-1);
         }
         Web3j web3WebSocket = Web3j.build(blocksWss);
-        HttpService web3HttpService = new HttpService(ethereumNodeHttpUrl);
+        HttpService web3HttpService =
+            RpcHttpServiceFactory.create(ethereumNodeHttpUrl);
         Web3j web3Http = Web3j.build(web3HttpService);
 
         Metrics metrics = Metrics.forDefaultRegistry();
