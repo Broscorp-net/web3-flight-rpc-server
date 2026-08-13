@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import io.prometheus.client.Histogram;
 import lombok.extern.slf4j.Slf4j;
 import net.broscorp.web3.archive.ArchiveKey;
+import net.broscorp.web3.archive.ChunkCompression;
 import net.broscorp.web3.archive.StreamingChunkWriter;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
@@ -41,6 +42,11 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * legacy or differently-configured runs may have written chunks at other
  * sizes, and the reader-side index treats whatever ranges it finds as
  * authoritative.
+ *
+ * <p>Record batches may be body-compressed per {@link ChunkCompression}. The
+ * codec is per-batch metadata, so switching {@code ARCHIVE_COMPRESSION}
+ * between runs is safe: previously-written chunks stay readable and the key
+ * layout is untouched.
  *
  * <p>Both archive writes and cold-tier reads are serialized via a
  * single-threaded executor so that ingestion-driven archives can never
@@ -69,6 +75,7 @@ public class S3ArchiveManager implements ArchiveManager {
     private final Converter converter;
     private final BufferAllocator allocator;
     private final Metrics metrics;
+    private final ChunkCompression compression;
     private final ExecutorService executor =
         Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "s3-archive");
@@ -94,9 +101,11 @@ public class S3ArchiveManager implements ArchiveManager {
         Converter converter,
         BufferAllocator allocator,
         Metrics metrics,
-        Duration indexRefreshInterval
+        Duration indexRefreshInterval,
+        ChunkCompression compression
     ) {
         this.s3 = s3;
+        this.compression = compression;
         int slash = bucket.indexOf('/');
         if (slash < 0) {
             this.bucket = bucket;
@@ -261,7 +270,8 @@ public class S3ArchiveManager implements ArchiveManager {
                     StandardOpenOption.WRITE,
                     StandardOpenOption.TRUNCATE_EXISTING
                 );
-                StreamingChunkWriter w = new StreamingChunkWriter(allocator, schema, ch)
+                StreamingChunkWriter w =
+                    new StreamingChunkWriter(allocator, schema, ch, compression)
             ) {
                 for (long n = startBlock; n < endBlock; n++) {
                     byte[] ipc = lookup.apply(n).orElse(null);
@@ -288,6 +298,13 @@ public class S3ArchiveManager implements ArchiveManager {
             s3.putObject(
                 PutObjectRequest.builder().bucket(bucket).key(key).build(),
                 RequestBody.fromFile(tmp)
+            );
+            log.info(
+                "Uploaded {} ({} batches, {} bytes, compression={})",
+                key,
+                batches,
+                Files.size(tmp),
+                compression
             );
         } finally {
             Files.deleteIfExists(tmp);

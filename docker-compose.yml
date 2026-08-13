@@ -54,6 +54,11 @@ services:
       #   optional - S3 if configured, otherwise warn and drop cold tier (default).
       #   required - fail startup if S3 isn't fully configured (prod).
       - ARCHIVE_MODE=off
+      # ARCHIVE_COMPRESSION: none|lz4|zstd|zstd:<1-22> — body compression for
+      # chunks written to S3 (default none). Write-side only: readers handle
+      # any codec, so this is safe to change or unset at any time and a
+      # bucket may hold a mix. zstd is ~2.5x smaller; recommended for prod.
+      # - ARCHIVE_COMPRESSION=zstd
       # - S3_BUCKET=my-web3-flight-archive
       # - S3_REGION=us-east-1
       # - AWS_ACCESS_KEY=...

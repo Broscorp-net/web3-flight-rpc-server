@@ -7,6 +7,7 @@ import java.nio.channels.Channels;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import lombok.extern.slf4j.Slf4j;
+import net.broscorp.web3.archive.ChunkCompression;
 import net.broscorp.web3.metrics.Metrics;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.BigIntVector;
@@ -22,6 +23,9 @@ import org.apache.arrow.vector.ipc.ArrowStreamWriter;
  * the reader robust to chunks containing gaps (missing blocks) or chunks
  * whose key does not start on a {@code CHUNK_SIZE} boundary, both of which
  * exist in legacy data written by older versions of the archive sweep.
+ *
+ * <p>Chunks written with {@code ARCHIVE_COMPRESSION} enabled are decompressed
+ * transparently; batches handed back to callers are always uncompressed IPC.
  *
  * <p>Contract: {@link #readBlock} must be called with strictly increasing
  * block numbers. A null return means the requested block is not in the
@@ -63,7 +67,12 @@ class S3ChunkReader implements ArchiveManager.ChunkReader {
         this.lastReturnedBlock = chunkStart - 1;
         this.in = Files.newInputStream(file);
         try {
-            this.reader = new ArrowStreamReader(in, allocator);
+            // Codec factory is passed unconditionally: it is only consulted
+            // for batches whose metadata declares a compression type, so
+            // uncompressed legacy chunks read exactly as before.
+            this.reader = new ArrowStreamReader(
+                in, allocator, ChunkCompression.readerFactory()
+            );
         } catch (Exception e) {
             in.close();
             throw e;

@@ -23,6 +23,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
+        <arrow.version>18.3.0</arrow.version>
         <log4j.version>2.23.1</log4j.version>
         <assertj.version>3.24.2</assertj.version>
         <lombok.version>1.18.30</lombok.version>
@@ -98,7 +99,16 @@
         <dependency>
             <groupId>org.apache.arrow</groupId>
             <artifactId>flight-core</artifactId>
-            <version>18.3.0</version>
+            <version>${arrow.version}</version>
+        </dependency>
+
+        <!-- LZ4/ZSTD codecs for Arrow IPC body compression (ARCHIVE_COMPRESSION).
+        Needed on the read side too: cold-tier readers pass the factory
+        unconditionally so compressed and uncompressed chunks both load. -->
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>arrow-compression</artifactId>
+            <version>${arrow.version}</version>
         </dependency>
 
         <dependency>

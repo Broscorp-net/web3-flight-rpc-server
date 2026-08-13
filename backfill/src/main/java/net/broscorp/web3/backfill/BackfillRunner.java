@@ -13,6 +13,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import lombok.extern.slf4j.Slf4j;
 import net.broscorp.web3.archive.ArchiveKey;
+import net.broscorp.web3.archive.ChunkCompression;
 import net.broscorp.web3.archive.StreamingChunkWriter;
 import net.broscorp.web3.backfill.ratelimit.TokenBucket;
 import net.broscorp.web3.backfill.sink.S3ChunkWriter;
@@ -81,8 +82,15 @@ public final class BackfillRunner {
         boolean skipExisting = boolEnvOr("BACKFILL_SKIP_EXISTING", true);
         double maxRps = doubleEnvOr("BACKFILL_MAX_RPS", 0.0);
         long chunkSize = longEnvOr("ARCHIVE_CHUNK_SIZE", ArchiveKey.DEFAULT_CHUNK_SIZE);
+        ChunkCompression compression =
+            ChunkCompression.parse(envOr("ARCHIVE_COMPRESSION", null));
+        // The corruption floor is a raw-byte heuristic; compressed chunks are
+        // legitimately several times smaller, so a floor tuned for
+        // uncompressed data would classify healthy chunks as missing and
+        // re-backfill them on every run.
         long minChunkBytesPerBlock = longEnvOr(
-            "BACKFILL_MIN_CHUNK_BYTES_PER_BLOCK", 5_000L
+            "BACKFILL_MIN_CHUNK_BYTES_PER_BLOCK",
+            compression.enabled() ? 1_000L : 5_000L
         );
 
         if (chunkSize <= 0) {
@@ -118,14 +126,15 @@ public final class BackfillRunner {
         long chunkCount =
             (lastChunkStartExclusive - firstChunkStart) / chunkSize;
         log.info(
-            "Backfill plan: {} chunks of {} blocks each — [{}, {}) using source={}, fetchParallelism={}, maxRps={}",
+            "Backfill plan: {} chunks of {} blocks each — [{}, {}) using source={}, fetchParallelism={}, maxRps={}, compression={}",
             chunkCount,
             chunkSize,
             firstChunkStart,
             lastChunkStartExclusive,
             sourceKind,
             fetchParallelism,
-            maxRps > 0 ? Double.toString(maxRps) : "unlimited"
+            maxRps > 0 ? Double.toString(maxRps) : "unlimited",
+            compression
         );
 
         TokenBucket rateLimiter = maxRps > 0
@@ -174,7 +183,8 @@ public final class BackfillRunner {
                         writer,
                         converter,
                         allocator,
-                        fetchParallelism
+                        fetchParallelism,
+                        compression
                     );
                     if (stats != null) {
                         uploaded++;
@@ -247,7 +257,8 @@ public final class BackfillRunner {
         S3ChunkWriter writer,
         Converter converter,
         BufferAllocator allocator,
-        int fetchParallelism
+        int fetchParallelism,
+        ChunkCompression compression
     ) throws Exception {
         long t0 = System.nanoTime();
         Map<Long, CompletableFuture<FullBlockData>> pending = new HashMap<>();
@@ -279,10 +290,10 @@ public final class BackfillRunner {
                     StandardOpenOption.TRUNCATE_EXISTING
                 );
                 StreamingChunkWriter blocksWriter = new StreamingChunkWriter(
-                    allocator, converter.getBlockSchema(), blocksCh
+                    allocator, converter.getBlockSchema(), blocksCh, compression
                 );
                 StreamingChunkWriter logsWriter = new StreamingChunkWriter(
-                    allocator, converter.getLogSchema(), logsCh
+                    allocator, converter.getLogSchema(), logsCh, compression
                 )
             ) {
                 long lastHeartbeatNs = t0;

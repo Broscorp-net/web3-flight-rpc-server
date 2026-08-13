@@ -84,6 +84,7 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 | `RETENTION_BLOCKS` | (unset = keep forever) | Hot-cache retention window. **Must be a multiple of `ARCHIVE_CHUNK_SIZE`** and **at least 2 × `ARCHIVE_CHUNK_SIZE`**. When set, blocks older than `lastIngestedBlock - RETENTION_BLOCKS` are eligible for the archive sweep + prune. |
 | `ARCHIVE_CHUNK_SIZE` | `1000` | Size in blocks of each archive chunk written to S3. Must match across writers (server + backfill) for the cleanest layout, but the read-side index tolerates mixed sizes if it changes between runs. Must be `> 0`. |
 | `ARCHIVE_MODE` | `optional` | `off` / `optional` / `required`. See "Archive modes" below. |
+| `ARCHIVE_COMPRESSION` | `none` | Body compression for chunks written to S3: `none` / `lz4` / `zstd` / `zstd:<1-22>`. Read side is always compression-capable regardless of this value. See "Archive compression" below. |
 | `S3_BUCKET` | — | Bucket name. Accepts `bucket` or `bucket/prefix`. **Must match the backfill's `S3_BUCKET`** so cold reads find the back-filled chunks. |
 | `S3_REGION` | `us-east-1` | AWS region. For S3-compatible providers that don't use regions (R2, Minio), set to `auto` or any non-empty value. |
 | `S3_ENDPOINT` | — | Optional override URL for S3-compatible services (Cloudflare R2, Minio, LocalStack). Leave unset for AWS S3. |
@@ -104,6 +105,58 @@ identical, last-write-wins on the same key), but you waste RPC + S3 PUTs.
 `ARCHIVE_MODE=off` with `RETENTION_BLOCKS` set logs a loud warning at
 startup — you're explicitly opting into permanent data loss for blocks
 older than retention.
+
+### Archive compression
+
+`ARCHIVE_COMPRESSION` compresses chunk data **inside** the Arrow IPC
+stream: each record batch's data buffers are compressed individually and
+the codec is recorded in that batch's metadata. Consequences worth
+knowing:
+
+- **The object stays a valid Arrow IPC stream** and keys are unchanged
+  (`<dataset>/<start>_<end>.arrow`). Nothing about the listing index,
+  chunk-range parsing, or alignment rules changes.
+- **Reads never depend on the setting.** Cold-tier readers always pass a
+  compression-capable codec factory, and Arrow only consults it for
+  batches whose metadata declares a codec. So a bucket may freely mix
+  uncompressed and compressed chunks — you can turn this on (or off, or
+  switch codecs) between restarts with no migration and no re-write of
+  existing objects. Old chunks stay readable forever.
+- **Writes stay streaming.** Compression happens per batch as the temp
+  file is assembled; nothing buffers a whole chunk in heap.
+- **Blocks handed to subscriptions are always uncompressed IPC** — the
+  reader decompresses on load, so `Producer`, the Flight wire format, and
+  the client are unaffected.
+
+Measured on synthetic mainnet-shaped data (500 blocks, 180 tx/block,
+40 logs/block, high-entropy hashes — `blocks/` + `logs/` combined):
+
+| `ARCHIVE_COMPRESSION` | Chunk bytes | Ratio |
+|---|---|---|
+| `none` | 20.1 MB | 1.0× |
+| `lz4` | 13.1 MB | 1.5× |
+| `zstd` | 8.0 MB | 2.5× |
+| `zstd:9` | 8.0 MB | 2.5× |
+
+**`zstd` (level 3, the default level) is the recommended setting.** Level
+9 measured no better on this data while costing noticeably more CPU —
+raise the level only if you benchmark a win on your own ranges. `lz4` is
+there for the case where archive-sweep CPU matters more than egress.
+
+The ceiling is set by the payload: most bytes are hex-encoded hashes,
+addresses, and log data, which are high-entropy after the ~2× that hex
+encoding itself gives back. Wrapping the whole object in gzip/zstd
+instead would not do much better for the same reason, and would cost
+the compatibility properties above.
+
+One caveat specific to this format: compression is per-buffer, and each
+compressed buffer carries an 8-byte uncompressed-length prefix. Because
+the archive writes **one record batch per block** (~30 buffers), that's
+~240 bytes of overhead per block. On real blocks it's noise; on a range
+of near-empty blocks (no transactions, no logs) a compressed chunk can
+come out slightly *larger* than an uncompressed one. Arrow already falls
+back to storing any individual buffer raw when compressing it wouldn't
+help, so the overhead is bounded by that prefix.
 
 ### Chunk alignment on fresh + warm starts
 
@@ -219,6 +272,7 @@ tracked as a follow-up.
 | `BACKFILL_FETCH_PARALLELISM` | `8` | Concurrent block fetches inside one chunk. Also caps per-chunk heap usage — at most this many `FullBlockData` objects are alive at once (see "Memory" below). |
 | `BACKFILL_MAX_RPS` | `0` (disabled) | Token-bucket rate limit on outgoing RPC calls. Each block fetch issues 2 calls (`eth_getBlockByNumber` + `eth_getBlockReceipts`), so set this to ~2× your provider's allowed RPS. `0` disables the limiter — only `BACKFILL_FETCH_PARALLELISM` throttles. |
 | `BACKFILL_SKIP_EXISTING` | `true` | Before assembling, the job does a `HEAD` against S3. If both `blocks/` and `logs/` chunks exist, the chunk is skipped. Set `false` to force re-upload. |
+| `BACKFILL_MIN_CHUNK_BYTES_PER_BLOCK` | `5000`, or `1000` when `ARCHIVE_COMPRESSION` is set | Corruption floor for the skip check: an existing chunk smaller than `this × blocks-in-chunk` is treated as missing and re-backfilled. Because the floor is a **raw**-byte heuristic, the default drops when compression is on — a floor tuned for uncompressed data would classify healthy compressed chunks as corrupt and re-upload them on every run. Set explicitly if you tune the codec or level, and keep it below the smallest healthy chunk you actually observe. `0` disables the floor. |
 
 ### S3
 
@@ -228,6 +282,7 @@ tracked as a follow-up.
 | `S3_ENDPOINT` | — | Optional override URL for S3-compatible services (Cloudflare R2, Minio, LocalStack). **Must match the server's `S3_ENDPOINT`** so both write to the same backend. |
 | `S3_FORCE_PATH_STYLE` | `false` | Use path-style URLs. Set `true` for Minio and most local S3 emulators. **Must match the server's value.** |
 | `ARCHIVE_CHUNK_SIZE` | `1000` | Chunk size in blocks. Should match the running server's value for a clean shared layout; mismatched sizes still work because the read index handles variable-size chunks. Must be `> 0`. |
+| `ARCHIVE_COMPRESSION` | `none` | `none` / `lz4` / `zstd` / `zstd:<1-22>`, same values as the server. Need **not** match the server's setting — the codec is per-batch metadata, so a bucket can hold a mix. See "Archive compression" above. |
 
 ### Memory
 
@@ -374,6 +429,15 @@ fall through to the RPC fallback (or fail, depending on
   below `pruneFloor`.
 - **Mismatched `S3_BUCKET` prefixes** → cold reads silently miss.
   `flight_archive_cold_reads_total{status="miss"}` is your indicator.
+- **`ARCHIVE_COMPRESSION` set on the backfill without lowering
+  `BACKFILL_MIN_CHUNK_BYTES_PER_BLOCK`** → healthy compressed chunks fall
+  under the raw-byte corruption floor and get re-uploaded on every run.
+  The default already adjusts; only an explicit value can break this.
+  Watch for `exists but is below floor` warnings.
+- **Expecting `ARCHIVE_COMPRESSION` to affect reads** → it doesn't. It is
+  a write-side setting only; readers handle every codec unconditionally,
+  so there's nothing to keep in sync between server and backfill and no
+  migration when you change it.
 - **Backfill against a consumer-tier RPC provider** → mass-fetch historical
   blocks will rate-limit you within minutes. Use an archive tier; set
   `BACKFILL_MAX_RPS` to ~2× your provider's request-rate cap (each block
@@ -397,6 +461,7 @@ INITIAL_BLOCK       = (unset; will use current head on first start)
 BACKFILL_BLOCKS     = 1000000   # ~4 months L1, used once on fresh cache
 RETENTION_BLOCKS    = 100000    # ~2 weeks L1
 ARCHIVE_MODE        = required
+ARCHIVE_COMPRESSION = zstd      # ~2.5x smaller chunks; safe to change anytime
 S3_BUCKET           = my-flight-archive/ethereum
 S3_REGION           = us-east-1
 AWS_ACCESS_KEY      = ***
@@ -414,6 +479,7 @@ BACKFILL_SOURCE             = rpc
 BACKFILL_FETCH_PARALLELISM  = 32           # archive-tier provider; also caps RAM
 BACKFILL_MAX_RPS            = 0            # disabled; rely on parallelism only
 BACKFILL_SKIP_EXISTING      = true
+ARCHIVE_COMPRESSION         = zstd         # need not match the server
 HTTP_NODE_URL               = https://eth.archive.example.com
 S3_BUCKET                   = my-flight-archive/ethereum    # SAME as server
 S3_REGION                   = us-east-1

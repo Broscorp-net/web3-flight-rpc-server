@@ -8,8 +8,11 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import net.broscorp.web3.archive.ArchiveKey;
+import net.broscorp.web3.archive.ChunkCompression;
 import net.broscorp.web3.archive.StreamingChunkWriter;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
@@ -22,6 +25,8 @@ import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.web3j.protocol.core.methods.response.EthBlock;
 
 class S3ChunkReaderTest {
@@ -141,6 +146,80 @@ class S3ChunkReaderTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "lz4", "zstd", "zstd:9"})
+    void readsChunkWrittenWithAnyCodec(String codecSpec) throws Exception {
+        long chunkStart = 24963000L;
+        Path file = writeChunk(
+            chunkStart,
+            new long[] {chunkStart, chunkStart + 1, chunkStart + 2},
+            ChunkCompression.parse(codecSpec)
+        );
+        try (
+            S3ChunkReader r = openReader(chunkStart, file)
+        ) {
+            assertBlock(r, chunkStart);
+            assertBlock(r, chunkStart + 1);
+            assertBlock(r, chunkStart + 2);
+        }
+    }
+
+    /**
+     * A bucket written across a config change holds both kinds of object. One
+     * reader build must serve either — the codec lives in per-batch metadata,
+     * not in the key or a server-side setting.
+     */
+    @Test
+    void readsUncompressedAndCompressedChunksFromTheSameBucket() throws Exception {
+        long uncompressedStart = 24963000L;
+        long compressedStart = 24964000L;
+        Path legacy = writeChunk(
+            uncompressedStart,
+            new long[] {uncompressedStart, uncompressedStart + 1},
+            ChunkCompression.NONE
+        );
+        Path current = writeChunk(
+            compressedStart,
+            new long[] {compressedStart, compressedStart + 1},
+            ChunkCompression.parse("zstd")
+        );
+        try (
+            S3ChunkReader legacyReader = openReader(uncompressedStart, legacy);
+            S3ChunkReader currentReader = openReader(compressedStart, current)
+        ) {
+            assertBlock(legacyReader, uncompressedStart);
+            assertBlock(currentReader, compressedStart);
+            assertBlock(legacyReader, uncompressedStart + 1);
+            assertBlock(currentReader, compressedStart + 1);
+        }
+    }
+
+    /**
+     * Compression is per-buffer, and each buffer carries an 8-byte
+     * uncompressed-length prefix. With one record batch per block that
+     * overhead is paid ~30 times per block, so it only pays off once the
+     * buffers hold real payload — here, a realistic transaction-hash list.
+     */
+    @Test
+    void compressedChunkIsSmallerThanUncompressedForRealisticBlocks()
+        throws Exception {
+        long chunkStart = 24963000L;
+        long[] blocks = new long[64];
+        for (int i = 0; i < blocks.length; i++) {
+            blocks[i] = chunkStart + i;
+        }
+        Path plain = writeChunk(chunkStart, blocks, ChunkCompression.NONE, 200);
+        Path zstd = writeChunk(
+            chunkStart, blocks, ChunkCompression.parse("zstd"), 200
+        );
+        try {
+            assertThat(Files.size(zstd)).isLessThan(Files.size(plain));
+        } finally {
+            Files.deleteIfExists(plain);
+            Files.deleteIfExists(zstd);
+        }
+    }
+
     @Test
     void closeDeletesTempFile() throws Exception {
         long chunkStart = 24963000L;
@@ -182,6 +261,23 @@ class S3ChunkReaderTest {
     }
 
     private Path writeChunk(long chunkStart, long[] blockNumbers) throws Exception {
+        return writeChunk(chunkStart, blockNumbers, ChunkCompression.NONE);
+    }
+
+    private Path writeChunk(
+        long chunkStart,
+        long[] blockNumbers,
+        ChunkCompression compression
+    ) throws Exception {
+        return writeChunk(chunkStart, blockNumbers, compression, 0);
+    }
+
+    private Path writeChunk(
+        long chunkStart,
+        long[] blockNumbers,
+        ChunkCompression compression,
+        int txPerBlock
+    ) throws Exception {
         Path file = Files.createTempFile("s3chunkreader-test-", ".arrow");
         Schema schema = converter.getBlockSchema();
         try (
@@ -190,16 +286,23 @@ class S3ChunkReaderTest {
                 StandardOpenOption.WRITE,
                 StandardOpenOption.TRUNCATE_EXISTING
             );
-            StreamingChunkWriter w = new StreamingChunkWriter(allocator, schema, ch)
+            StreamingChunkWriter w =
+                new StreamingChunkWriter(allocator, schema, ch, compression)
         ) {
             for (long n : blockNumbers) {
-                w.appendBatch(converter.toBlockIpcBytes(allocator, makeBlock(n)));
+                w.appendBatch(
+                    converter.toBlockIpcBytes(allocator, makeBlock(n, txPerBlock))
+                );
             }
         }
         return file;
     }
 
     private EthBlock.Block makeBlock(long n) {
+        return makeBlock(n, 0);
+    }
+
+    private EthBlock.Block makeBlock(long n, int txCount) {
         EthBlock.Block b = new EthBlock.Block();
         b.setNumber("0x" + Long.toHexString(n));
         b.setHash("0xhash" + n);
@@ -210,7 +313,21 @@ class S3ChunkReaderTest {
         b.setGasUsed("0x0");
         b.setSize("0x100");
         b.setExtraData("0x");
-        b.setTransactions(Collections.emptyList());
+        if (txCount == 0) {
+            b.setTransactions(Collections.emptyList());
+        } else {
+            List<EthBlock.TransactionResult> txs = new ArrayList<>(txCount);
+            for (int i = 0; i < txCount; i++) {
+                txs.add(new EthBlock.TransactionHash(txHash(n, i)));
+            }
+            b.setTransactions(txs);
+        }
         return b;
+    }
+
+    /** A 32-byte hex tx hash, deterministic per (block, index). */
+    private static String txHash(long blockNumber, int index) {
+        String seed = Long.toHexString(blockNumber * 1_000_003L + index * 31L);
+        return "0x" + "0".repeat(Math.max(0, 64 - seed.length())) + seed;
     }
 }

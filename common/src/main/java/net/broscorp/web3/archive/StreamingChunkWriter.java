@@ -7,6 +7,7 @@ import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowStreamReader;
 import org.apache.arrow.vector.ipc.ArrowStreamWriter;
+import org.apache.arrow.vector.ipc.message.IpcOption;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.arrow.vector.util.TransferPair;
 
@@ -19,6 +20,11 @@ import org.apache.arrow.vector.util.TransferPair;
  * vectors into the root, writes the batch to the sink channel, and clears
  * the root for the next call. Suitable for streaming chunk assembly to a
  * file or network channel where heap pressure must stay bounded.
+ *
+ * <p>Input batches are always read uncompressed (they come from the hot
+ * cache / converter). Output batches are compressed per
+ * {@link ChunkCompression}, which is recorded in each batch's metadata so
+ * readers decompress transparently.
  */
 public final class StreamingChunkWriter implements AutoCloseable {
 
@@ -27,14 +33,34 @@ public final class StreamingChunkWriter implements AutoCloseable {
     private final ArrowStreamWriter writer;
     private int batches;
 
+    /** Writes an uncompressed chunk stream. */
     public StreamingChunkWriter(
         BufferAllocator allocator,
         Schema schema,
         WritableByteChannel sink
     ) throws IOException {
+        this(allocator, schema, sink, ChunkCompression.NONE);
+    }
+
+    public StreamingChunkWriter(
+        BufferAllocator allocator,
+        Schema schema,
+        WritableByteChannel sink,
+        ChunkCompression compression
+    ) throws IOException {
         this.allocator = allocator;
         this.target = VectorSchemaRoot.create(schema, allocator);
-        this.writer = new ArrowStreamWriter(target, null, sink);
+        this.writer = compression.enabled()
+            ? new ArrowStreamWriter(
+                target,
+                null,
+                sink,
+                IpcOption.DEFAULT,
+                compression.writerFactory(),
+                compression.codec(),
+                compression.level()
+            )
+            : new ArrowStreamWriter(target, null, sink);
         this.writer.start();
     }
 

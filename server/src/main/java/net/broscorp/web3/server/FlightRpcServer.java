@@ -8,6 +8,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import lombok.extern.slf4j.Slf4j;
 import net.broscorp.web3.archive.ArchiveKey;
+import net.broscorp.web3.archive.ChunkCompression;
 import net.broscorp.web3.converter.Converter;
 import net.broscorp.web3.metrics.Metrics;
 import net.broscorp.web3.producer.Producer;
@@ -68,6 +69,7 @@ public class FlightRpcServer {
         String dbPath = System.getenv("DB_PATH");
 
         String archiveModeString = System.getenv("ARCHIVE_MODE");
+        String archiveCompressionString = System.getenv("ARCHIVE_COMPRESSION");
         String s3Bucket = System.getenv("S3_BUCKET");
         String s3Region = System.getenv("S3_REGION");
         String s3Endpoint = System.getenv("S3_ENDPOINT");
@@ -99,6 +101,14 @@ public class FlightRpcServer {
                 ? Long.parseLong(chunkSizeString)
                 : ArchiveKey.DEFAULT_CHUNK_SIZE;
         ArchiveMode archiveMode = ArchiveMode.parse(archiveModeString);
+        ChunkCompression archiveCompression;
+        try {
+            archiveCompression = ChunkCompression.parse(archiveCompressionString);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid ARCHIVE_COMPRESSION: {}", e.getMessage());
+            System.exit(-1);
+            return;
+        }
 
         if (archiveChunkSize <= 0) {
             log.error("ARCHIVE_CHUNK_SIZE must be > 0 (got {})", archiveChunkSize);
@@ -211,7 +221,8 @@ public class FlightRpcServer {
                 s3Endpoint,
                 s3ForcePathStyle,
                 awsAccessKey,
-                awsSecretKey
+                awsSecretKey,
+                archiveCompression
             );
         } catch (Exception e) {
             log.error("Failed to start Flight server", e);
@@ -243,7 +254,8 @@ public class FlightRpcServer {
         String s3Endpoint,
         boolean s3ForcePathStyle,
         String awsAccessKey,
-        String awsSecretKey
+        String awsSecretKey,
+        ChunkCompression archiveCompression
     ) throws Exception {
         BufferAllocator ingestorAllocator = rootAllocator.newChildAllocator(
             "ingestor", 0, Long.MAX_VALUE
@@ -269,16 +281,17 @@ public class FlightRpcServer {
                 S3Client s3 = s3Builder.build();
                 s3ArchiveManager = new S3ArchiveManager(
                     s3, s3Bucket, cache, converter, archiveAllocator, metrics,
-                    Duration.ofMinutes(10)
+                    Duration.ofMinutes(10), archiveCompression
                 );
                 archiveManager = s3ArchiveManager;
                 log.info(
-                    "S3 archiving enabled for bucket: {}{}{}",
+                    "S3 archiving enabled for bucket: {}{}{} (compression={})",
                     s3Bucket,
                     s3Endpoint != null && !s3Endpoint.isBlank()
                         ? " (endpoint=" + s3Endpoint + ")"
                         : "",
-                    s3ForcePathStyle ? " (path-style)" : ""
+                    s3ForcePathStyle ? " (path-style)" : "",
+                    archiveCompression
                 );
             }
 
