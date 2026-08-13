@@ -1,0 +1,83 @@
+name: Unit tests
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to push the regenerated coverage badges back to main.
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      # `verify` (not `test`) because the JaCoCo report goal is bound to the
+      # verify phase; surefire still runs the unit tests as part of it.
+      - name: Run tests with coverage
+        run: mvn -B --no-transfer-progress verify
+
+      - name: Upload surefire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/*'
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload JaCoCo HTML reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports
+          path: '**/target/site/jacoco/*'
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Sums the per-module CSVs; modules without tests produce no CSV and are
+      # simply not matched by the glob.
+      - name: Generate coverage badges
+        id: coverage
+        uses: cicirello/jacoco-badge-generator@v2
+        with:
+          jacoco-csv-file: '*/target/site/jacoco/jacoco.csv'
+          badges-directory: .github/badges
+          generate-branches-badge: true
+
+      - name: Write coverage to job summary
+        env:
+          # The action reports fractions (e.g. 0.354), so scale to percent here.
+          INSTRUCTIONS: ${{ steps.coverage.outputs.coverage }}
+          BRANCHES: ${{ steps.coverage.outputs.branches }}
+        run: |
+          {
+            echo "## Coverage"
+            echo ""
+            echo "| Metric | Coverage |"
+            echo "| --- | --- |"
+            echo "| Instructions | $(awk -v v="$INSTRUCTIONS" 'BEGIN{printf "%.1f%%", v*100}') |"
+            echo "| Branches | $(awk -v v="$BRANCHES" 'BEGIN{printf "%.1f%%", v*100}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit updated badges
+        run: |
+          if git diff --quiet .github/badges; then
+            echo "Badges unchanged, nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/badges
+          git commit -m "Update coverage badges [skip ci]"
+          git push

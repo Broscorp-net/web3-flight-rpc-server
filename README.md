@@ -1,4 +1,9 @@
 # web3-flight-rpc-server
+
+[![Unit tests](https://github.com/Broscorp-net/web3-flight-rpc-server/actions/workflows/tests.yml/badge.svg)](https://github.com/Broscorp-net/web3-flight-rpc-server/actions/workflows/tests.yml)
+[![Coverage](.github/badges/jacoco.svg)](https://github.com/Broscorp-net/web3-flight-rpc-server/actions/workflows/tests.yml)
+[![Branches](.github/badges/branches.svg)](https://github.com/Broscorp-net/web3-flight-rpc-server/actions/workflows/tests.yml)
+
 Blockchain data streaming in Apache Arrow format. Web3 data for data engineers, ready for large-scale analysis
 
 ## Project Overview
@@ -143,6 +148,33 @@ This will create the following JAR files:
 - `server/target/server.jar` - long-running Flight RPC server
 - `backfill/target/backfill.jar` - one-shot batch S3 backfill job
 - `client/target/client.jar` - example client
+
+## Tests and Coverage
+
+Run the tests locally:
+
+```bash
+mvn test
+```
+
+Run them with a [JaCoCo](https://www.jacoco.org/jacoco/) coverage report:
+
+```bash
+mvn clean verify
+```
+
+Each module writes its own HTML report to `<module>/target/site/jacoco/index.html`,
+plus a `jacoco.csv` with the raw counters. To open the server module's report:
+
+```bash
+xdg-open server/target/site/jacoco/index.html
+```
+
+To skip instrumentation entirely (e.g. when profiling a test):
+
+```bash
+mvn verify -Djacoco.skip=true
+```
 
 ## Running the Applications
 

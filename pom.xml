@@ -27,6 +27,10 @@
         <log4j.version>2.23.1</log4j.version>
         <assertj.version>3.24.2</assertj.version>
         <lombok.version>1.18.30</lombok.version>
+        <jacoco.version>0.8.12</jacoco.version>
+        <!-- Filled in by jacoco:prepare-agent; empty default keeps surefire working
+             when coverage is skipped (-Djacoco.skip=true). -->
+        <jacocoArgLine></jacocoArgLine>
     </properties>
 
     <build>
@@ -37,9 +41,34 @@
                 <version>3.5.3</version>
                 <configuration>
                     <argLine>
+                        @{jacocoArgLine}
                         --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED
                     </argLine>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <configuration>
+                    <!-- Own property so we don't clobber surefire's argLine. -->
+                    <propertyName>jacocoArgLine</propertyName>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
